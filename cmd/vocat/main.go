@@ -240,10 +240,9 @@ func newVoWiFiOrchestrator(
 		return nil, fmt.Errorf("device %q IKE provider: %w", deviceConfig.ID, err)
 	}
 	imsProvider, err := ims.NewProvider(adapter, ims.Config{
-		// O2 Germany uses UDP for the SIP/IMS leg delivered through the SWu
-		// tunnel. This will be selected per home PLMN once the live probe has
-		// confirmed the expected registration challenge.
-		Transport: "udp",
+		// The userspace SWu data plane currently carries the protected P-CSCF
+		// signalling path over TCP.
+		Transport: "tcp",
 		// Some Vodafone UK SIM profiles leave AT+CSCA empty; Vodafone publishes
 		// this service-centre number for manual SMS setup.
 		SMSCenter: "+447785016005",
