@@ -1,0 +1,58 @@
+// MCC/MNC → carrier lookup. Data is the musalbas/mcc-mnc-table dataset (the same
+// one vohive uses), slimmed to { c: plmn→[name,iso], i: mcc→iso, t: 3-digit-MNC MCCs }.
+// Source: https://raw.githubusercontent.com/musalbas/mcc-mnc-table/master/mcc-mnc-table.json
+import table from "./mccmnc.json";
+
+interface MccMncTable {
+  c: Record<string, string[]>;
+  i: Record<string, string>;
+  t: string[];
+}
+
+const data = table as unknown as MccMncTable;
+const THREE_DIGIT = new Set(data.t);
+
+export interface CarrierInfo {
+  mcc: string;
+  mnc: string;
+  name: string;
+  iso: string;
+}
+
+function imsiDigits(imsi?: string): string {
+  return String(imsi ?? "").replace(/\D/g, "");
+}
+
+// lookupCarrier resolves a SIM's home ("original") carrier from its IMSI. MNC length
+// varies by MCC (2 vs 3 digits); North-American/Mexican MCCs are 3-digit-first, the
+// rest 2-digit-first, with a fallback to the other length so real carriers resolve.
+export function lookupCarrier(imsi?: string): CarrierInfo | null {
+  const digits = imsiDigits(imsi);
+  if (digits.length < 5) return null;
+  const mcc = digits.slice(0, 3);
+  const order = THREE_DIGIT.has(mcc) ? [3, 2] : [2, 3];
+  for (const len of order) {
+    const mnc = digits.slice(3, 3 + len);
+    const hit = data.c[mcc + mnc];
+    if (hit) return { mcc, mnc, name: hit[0], iso: hit[1] };
+  }
+  return null;
+}
+
+// carrierIso returns the alpha-2 country code for the SIM's home carrier, falling
+// back to the MCC's country when the exact MNC is not catalogued.
+export function carrierIso(imsi?: string): string {
+  const hit = lookupCarrier(imsi);
+  if (hit) return hit.iso;
+  return data.i[imsiDigits(imsi).slice(0, 3)] ?? "";
+}
+
+// flagEmoji converts an alpha-2 country code to its regional-indicator flag emoji.
+export function flagEmoji(iso?: string): string {
+  const s = String(iso ?? "").trim().toUpperCase();
+  if (s.length !== 2) return "";
+  const a = s.charCodeAt(0);
+  const b = s.charCodeAt(1);
+  if (a < 65 || a > 90 || b < 65 || b > 90) return "";
+  return String.fromCodePoint(0x1f1e6 + (a - 65)) + String.fromCodePoint(0x1f1e6 + (b - 65));
+}

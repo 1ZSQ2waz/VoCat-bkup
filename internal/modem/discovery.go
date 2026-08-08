@@ -1,0 +1,307 @@
+package modem
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+const quectelVendorID = "2c7c"
+
+type SysFSDiscoverer struct {
+	SysRoot string
+	DevRoot string
+}
+
+func NewSysFSDiscoverer(sysRoot, devRoot string) *SysFSDiscoverer {
+	return &SysFSDiscoverer{
+		SysRoot: filepath.Clean(sysRoot),
+		DevRoot: filepath.Clean(devRoot),
+	}
+}
+
+type discoveredUSBDevice struct {
+	candidate Candidate
+	ports     map[string]Port
+}
+
+func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	usbRoot := filepath.Join(d.SysRoot, "bus", "usb", "devices")
+	entries, err := os.ReadDir(usbRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("discover Quectel USB devices: %w", err)
+	}
+
+	aliases := readSerialAliases(filepath.Join(d.DevRoot, "serial", "by-id"))
+	devices := make(map[string]*discoveredUSBDevice)
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		interfaceNumber, ok := parseUSBInterfaceName(entry.Name())
+		if !ok {
+			continue
+		}
+		interfacePath := filepath.Join(usbRoot, entry.Name())
+		resolvedInterface, err := filepath.EvalSymlinks(interfacePath)
+		if err != nil {
+			resolvedInterface = interfacePath
+		}
+		if value, err := readHexByte(filepath.Join(resolvedInterface, "bInterfaceNumber")); err == nil {
+			interfaceNumber = value
+		}
+
+		deviceName := strings.SplitN(entry.Name(), ":", 2)[0]
+		devicePath := filepath.Join(usbRoot, deviceName)
+		resolvedDevice, err := filepath.EvalSymlinks(devicePath)
+		if err != nil {
+			resolvedDevice = devicePath
+		}
+		vendorID := strings.ToLower(readTrimmed(filepath.Join(resolvedDevice, "idVendor")))
+		if vendorID != quectelVendorID {
+			continue
+		}
+
+		state := devices[deviceName]
+		if state == nil {
+			productID := strings.ToLower(readTrimmed(filepath.Join(resolvedDevice, "idProduct")))
+			serialNumber := readTrimmed(filepath.Join(resolvedDevice, "serial"))
+			state = &discoveredUSBDevice{
+				candidate: Candidate{
+					ID:           candidateID(productID, serialNumber, deviceName),
+					VendorID:     vendorID,
+					ProductID:    productID,
+					Manufacturer: readTrimmed(filepath.Join(resolvedDevice, "manufacturer")),
+					Product:      readTrimmed(filepath.Join(resolvedDevice, "product")),
+					SerialNumber: serialNumber,
+					USBPath:      devicePath,
+				},
+				ports: make(map[string]Port),
+			}
+			devices[deviceName] = state
+		}
+
+		ttyNames, qmiControls, networkInterfaces := scanUSBInterface(resolvedInterface)
+		for _, name := range ttyNames {
+			if !strings.HasPrefix(name, "ttyUSB") && !strings.HasPrefix(name, "ttyACM") {
+				continue
+			}
+			path := filepath.Join(d.DevRoot, name)
+			state.ports[name] = Port{
+				Path:            path,
+				StablePath:      aliases[name],
+				Name:            name,
+				InterfaceNumber: interfaceNumber,
+				Role:            quecPortRole(interfaceNumber, name),
+			}
+		}
+		if state.candidate.QMIControl == "" && len(qmiControls) > 0 {
+			state.candidate.QMIControl = filepath.Join(d.DevRoot, qmiControls[0])
+		}
+		if state.candidate.NetworkInterface == "" && len(networkInterfaces) > 0 {
+			state.candidate.NetworkInterface = networkInterfaces[0]
+		}
+	}
+
+	result := make([]Candidate, 0, len(devices))
+	for _, state := range devices {
+		state.candidate.Ports = make([]Port, 0, len(state.ports))
+		for _, port := range state.ports {
+			state.candidate.Ports = append(state.candidate.Ports, port)
+		}
+		sort.Slice(state.candidate.Ports, func(i, j int) bool {
+			left, right := state.candidate.Ports[i], state.candidate.Ports[j]
+			if left.InterfaceNumber != right.InterfaceNumber {
+				return left.InterfaceNumber < right.InterfaceNumber
+			}
+			return left.Name < right.Name
+		})
+		state.candidate.ATPort = selectATPort(state.candidate.Ports)
+		result = append(result, state.candidate)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result, nil
+}
+
+func parseUSBInterfaceName(name string) (int, bool) {
+	_, suffix, ok := strings.Cut(name, ":")
+	if !ok {
+		return 0, false
+	}
+	_, numberText, ok := strings.Cut(suffix, ".")
+	if !ok || numberText == "" {
+		return 0, false
+	}
+	number, err := strconv.ParseInt(numberText, 10, 32)
+	return int(number), err == nil
+}
+
+func readHexByte(path string) (int, error) {
+	value := readTrimmed(path)
+	number, err := strconv.ParseUint(value, 16, 8)
+	return int(number), err
+}
+
+func readTrimmed(path string) string {
+	value, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(value))
+}
+
+func scanUSBInterface(root string) (ttyNames, qmiControls, networkInterfaces []string) {
+	ttySeen := make(map[string]struct{})
+	qmiSeen := make(map[string]struct{})
+	netSeen := make(map[string]struct{})
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		name := entry.Name()
+		switch {
+		case entry.IsDir() && (strings.HasPrefix(name, "ttyUSB") || strings.HasPrefix(name, "ttyACM")):
+			ttySeen[name] = struct{}{}
+		case strings.HasPrefix(name, "cdc-wdm"):
+			qmiSeen[name] = struct{}{}
+		case entry.IsDir() && filepath.Base(filepath.Dir(path)) == "net":
+			netSeen[name] = struct{}{}
+		}
+		return nil
+	})
+	for name := range ttySeen {
+		ttyNames = append(ttyNames, name)
+	}
+	for name := range qmiSeen {
+		qmiControls = append(qmiControls, name)
+	}
+	for name := range netSeen {
+		networkInterfaces = append(networkInterfaces, name)
+	}
+	sort.Strings(ttyNames)
+	sort.Strings(qmiControls)
+	sort.Strings(networkInterfaces)
+	return
+}
+
+func readSerialAliases(root string) map[string]string {
+	result := make(map[string]string)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return result
+	}
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		target, err := os.Readlink(path)
+		if err != nil {
+			continue
+		}
+		name := filepath.Base(filepath.Clean(target))
+		if strings.HasPrefix(name, "ttyUSB") || strings.HasPrefix(name, "ttyACM") {
+			if existing := result[name]; existing == "" || path < existing {
+				result[name] = path
+			}
+		}
+	}
+	return result
+}
+
+func candidateID(productID, serialNumber, usbName string) string {
+	serialNumber = strings.TrimSpace(serialNumber)
+	if serialNumber != "" && !strings.EqualFold(serialNumber, "android") {
+		return "quectel-" + sanitizeID(serialNumber)
+	}
+	return "quectel-" + sanitizeID(productID+"-"+usbName)
+}
+
+func sanitizeID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var result strings.Builder
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' ||
+			character == '-' || character == '_' {
+			result.WriteRune(character)
+		} else {
+			result.WriteByte('-')
+		}
+	}
+	return strings.Trim(result.String(), "-")
+}
+
+func quecPortRole(interfaceNumber int, name string) PortRole {
+	// Quectel exposes the same logical ports under more than one USB
+	// composition. In both layouts seen on EC20/EC25 hardware the kernel
+	// stable tty name is the stronger hint: ttyUSB0 is diagnostic and
+	// ttyUSB2 is the primary AT port, even when their interface numbers are
+	// 00/02 instead of 02/04.
+	switch name {
+	case "ttyUSB0":
+		return PortRoleDiagnostic
+	case "ttyUSB1":
+		return PortRoleNMEA
+	case "ttyUSB2":
+		return PortRoleAT
+	case "ttyUSB3":
+		return PortRoleModem
+	}
+	switch interfaceNumber {
+	case 0x02:
+		return PortRoleDiagnostic
+	case 0x03:
+		return PortRoleNMEA
+	case 0x04:
+		return PortRoleAT
+	case 0x05:
+		return PortRoleModem
+	default:
+		if name == "ttyUSB2" {
+			return PortRoleAT
+		}
+		return PortRoleUnknown
+	}
+}
+
+func selectATPort(ports []Port) Port {
+	var best Port
+	bestScore := 0
+	for _, port := range ports {
+		score := 0
+		switch {
+		case port.Name == "ttyUSB2":
+			score = 120
+		case port.Role == PortRoleAT:
+			score = 100
+		case port.InterfaceNumber == 0x04:
+			score = 90
+		case port.InterfaceNumber == 0x05:
+			score = 40
+		case port.Role == PortRoleModem:
+			score = 30
+		}
+		if score > bestScore {
+			best, bestScore = port, score
+		}
+	}
+	if bestScore <= 0 {
+		return Port{}
+	}
+	return best
+}
+
+type unsupportedDiscoverer struct{}
+
+func (unsupportedDiscoverer) Discover(context.Context) ([]Candidate, error) {
+	return nil, ErrUnsupportedPlatform
+}

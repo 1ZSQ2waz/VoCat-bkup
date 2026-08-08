@@ -1,0 +1,1333 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/mail"
+	"net/netip"
+	"net/smtp"
+	"net/url"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"vocat/internal/store"
+)
+
+var (
+	errUnsafeDestination = errors.New("notification destination is not public")
+	errProviderRejected  = errors.New("notification provider rejected the test")
+	telegramTokenPattern = regexp.MustCompile(`^[0-9]{5,20}:[A-Za-z0-9_-]{20,128}$`)
+)
+
+var notificationChannels = []string{
+	"telegram",
+	"email",
+	"webhook",
+	"bark",
+	"pushplus",
+}
+
+var notificationFields = map[string]map[string]string{
+	"telegram": {
+		"bot_token": "string", "chat_id": "string", "admin_id": "string",
+		"base_url": "string", "proxy": "string",
+	},
+	"email": {
+		"use_ssl": "boolean", "smtp_host": "string", "smtp_port": "integer", "username": "string",
+		"password": "string", "from_address": "string", "to_addresses": "strings",
+	},
+	"webhook": {
+		"urls": "strings", "secret": "string", "timeout_ms": "integer",
+		"retry_max": "integer", "text_template": "string", "headers": "string_map",
+	},
+	"bark": {
+		"urls": "strings", "group": "string", "icon": "string", "level": "string",
+	},
+	"pushplus": {
+		"token": "string", "topic": "string", "channel": "string",
+	},
+}
+
+// routeSettingsAPI is intentionally independent of the main router so it can
+// be wired after the surrounding authentication and CSRF checks.
+func (s *Server) routeSettingsAPI(
+	w http.ResponseWriter,
+	r *http.Request,
+	cleanPath string,
+) bool {
+	cleanPath = strings.Trim(cleanPath, "/")
+	switch cleanPath {
+	case "settings/notifications":
+		s.handleNotificationSettings(w, r)
+		return true
+	case "traffic/analysis":
+		s.handleTrafficAnalysis(w, r)
+		return true
+	case "cards/policies":
+		s.handleCardPolicies(w, r)
+		return true
+	case "settings/security":
+		s.handleSecuritySettings(w, r)
+		return true
+	case "settings/logging":
+		s.handleLoggingSettings(w, r)
+		return true
+	}
+	segments := splitAPIPath(cleanPath)
+	if len(segments) == 4 &&
+		segments[0] == "settings" &&
+		segments[1] == "notifications" &&
+		segments[3] == "test" {
+		s.handleNotificationTest(w, r, segments[2])
+		return true
+	}
+	if len(segments) == 3 && segments[0] == "cards" && segments[2] == "policy" {
+		s.handleCardPolicy(w, r, segments[1])
+		return true
+	}
+	return false
+}
+
+func (s *Server) handleNotificationSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.writeNotificationSettings(w, r)
+	case http.MethodPut:
+		var request map[string]json.RawMessage
+		if err := s.decodeJSON(w, r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		if request == nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", "request body must be a JSON object")
+			return
+		}
+		values := make([]store.NotificationSetting, 0, len(request))
+		for _, channel := range notificationChannels {
+			raw, present := request[channel]
+			if !present {
+				continue
+			}
+			enabled, config, err := decodeNotificationConfig(channel, raw, true)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid_notification_config", err.Error())
+				return
+			}
+			values = append(values, store.NotificationSetting{
+				Channel:         channel,
+				Enabled:         enabled,
+				Config:          config,
+				SensitiveFields: store.DefaultNotificationSensitiveFields(channel),
+			})
+		}
+		for channel := range request {
+			if !knownNotificationChannel(channel) {
+				writeError(
+					w,
+					http.StatusBadRequest,
+					"invalid_notification_channel",
+					fmt.Sprintf("unsupported notification channel %q", channel),
+				)
+				return
+			}
+		}
+		if err := s.store.SaveNotificationSettings(r.Context(), values); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		s.writeNotificationSettings(w, r)
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	}
+}
+
+func (s *Server) writeNotificationSettings(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.store.ListNotificationSettings(r.Context())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	stored := make(map[string]store.NotificationSetting, len(settings))
+	for _, setting := range settings {
+		stored[setting.Channel] = setting
+	}
+	response := make(map[string]any, len(notificationChannels))
+	for _, channel := range notificationChannels {
+		document := map[string]any{"enabled": false}
+		if setting, ok := stored[channel]; ok {
+			redacted := setting.Redacted()
+			if err := json.Unmarshal(redacted.Config, &document); err != nil {
+				s.logger.Error(
+					"notification setting contains invalid JSON",
+					"channel",
+					channel,
+					"error",
+					err,
+				)
+				writeError(w, http.StatusInternalServerError, "database_error", "the database operation failed")
+				return
+			}
+			document["enabled"] = setting.Enabled
+		}
+		response[channel] = document
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": response})
+}
+
+func decodeNotificationConfig(
+	channel string,
+	raw json.RawMessage,
+	requireEnabled bool,
+) (bool, json.RawMessage, error) {
+	if !knownNotificationChannel(channel) {
+		return false, nil, fmt.Errorf("unsupported notification channel %q", channel)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil || document == nil {
+		return false, nil, fmt.Errorf("%s notification config must be an object", channel)
+	}
+	enabled := false
+	enabledRaw, hasEnabled := document["enabled"]
+	if requireEnabled && !hasEnabled {
+		return false, nil, fmt.Errorf("%s.enabled is required", channel)
+	}
+	if hasEnabled {
+		if err := json.Unmarshal(enabledRaw, &enabled); err != nil {
+			return false, nil, fmt.Errorf("%s.enabled must be a boolean", channel)
+		}
+		delete(document, "enabled")
+	}
+
+	fields := notificationFields[channel]
+	for name, value := range document {
+		kind, known := fields[name]
+		if !known {
+			return false, nil, fmt.Errorf("%s.%s is not supported", channel, name)
+		}
+		if err := validateNotificationField(channel, name, kind, value); err != nil {
+			return false, nil, err
+		}
+	}
+	config, err := json.Marshal(document)
+	if err != nil {
+		return false, nil, fmt.Errorf("encode %s notification config: %w", channel, err)
+	}
+	return enabled, config, nil
+}
+
+func validateNotificationField(
+	channel string,
+	name string,
+	kind string,
+	raw json.RawMessage,
+) error {
+	field := channel + "." + name
+	switch kind {
+	case "boolean":
+		var value bool
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return fmt.Errorf("%s must be a boolean", field)
+		}
+	case "string":
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return fmt.Errorf("%s must be a string", field)
+		}
+		limit := 4096
+		if name == "text_template" {
+			limit = 32768
+		}
+		if len(value) > limit || strings.ContainsAny(value, "\x00") {
+			return fmt.Errorf("%s is too long or contains invalid characters", field)
+		}
+		if (name == "base_url" || name == "proxy") && value != "" {
+			if _, err := parseOutboundURL(value, false); err != nil {
+				return fmt.Errorf("%s is not a valid HTTP URL", field)
+			}
+		}
+		if name == "from_address" && value != "" {
+			if _, err := mail.ParseAddress(value); err != nil {
+				return fmt.Errorf("%s is not a valid email address", field)
+			}
+		}
+	case "integer":
+		var value int
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return fmt.Errorf("%s must be an integer", field)
+		}
+		switch name {
+		case "smtp_port":
+			if value < 0 || value > 65535 {
+				return fmt.Errorf("%s must be between 0 and 65535", field)
+			}
+		case "timeout_ms":
+			if value != 0 && (value < 100 || value > 60000) {
+				return fmt.Errorf("%s must be 0 or between 100 and 60000", field)
+			}
+		case "retry_max":
+			if value < 0 || value > 10 {
+				return fmt.Errorf("%s must be between 0 and 10", field)
+			}
+		}
+	case "strings":
+		var values []string
+		if err := json.Unmarshal(raw, &values); err != nil {
+			return fmt.Errorf("%s must be an array of strings", field)
+		}
+		if len(values) > 32 {
+			return fmt.Errorf("%s cannot contain more than 32 values", field)
+		}
+		for _, value := range values {
+			if strings.TrimSpace(value) == "" || len(value) > 4096 ||
+				strings.ContainsAny(value, "\r\n\x00") {
+				return fmt.Errorf("%s contains an invalid value", field)
+			}
+			if name == "urls" {
+				if _, err := parseOutboundURL(value, false); err != nil {
+					return fmt.Errorf("%s contains an invalid HTTP URL", field)
+				}
+			}
+			if name == "to_addresses" {
+				if _, err := mail.ParseAddress(value); err != nil {
+					return fmt.Errorf("%s contains an invalid email address", field)
+				}
+			}
+		}
+	case "string_map":
+		var values map[string]string
+		if err := json.Unmarshal(raw, &values); err != nil {
+			return fmt.Errorf("%s must be an object of strings", field)
+		}
+		if len(values) > 32 {
+			return fmt.Errorf("%s cannot contain more than 32 entries", field)
+		}
+		for key, value := range values {
+			if strings.TrimSpace(key) == "" || len(key) > 128 ||
+				strings.ContainsAny(key, "\r\n:\x00") {
+				return fmt.Errorf("%s contains an invalid header name", field)
+			}
+			if len(value) > 4096 || strings.ContainsAny(value, "\r\n\x00") {
+				return fmt.Errorf("%s contains an invalid header value", field)
+			}
+		}
+	default:
+		return fmt.Errorf("%s has an unsupported field type", field)
+	}
+	return nil
+}
+
+func knownNotificationChannel(channel string) bool {
+	_, ok := notificationFields[channel]
+	return ok
+}
+
+func (s *Server) handleNotificationTest(
+	w http.ResponseWriter,
+	r *http.Request,
+	channel string,
+) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	if !knownNotificationChannel(channel) {
+		writeError(w, http.StatusNotFound, "not_found", "notification channel was not found")
+		return
+	}
+	if channel != "webhook" && channel != "telegram" && channel != "email" && channel != "bark" {
+		writeError(
+			w,
+			http.StatusNotImplemented,
+			"notification_test_unsupported",
+			"this notification channel does not support a connectivity test",
+		)
+		return
+	}
+	var raw json.RawMessage
+	if err := s.decodeJSON(w, r, &raw); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	_, incoming, err := decodeNotificationConfig(channel, raw, false)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_notification_config", err.Error())
+		return
+	}
+	resolved, provider, err := s.resolveNotificationTestConfig(
+		r.Context(),
+		channel,
+		incoming,
+	)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"notification_not_configured",
+				"notification channel is not configured",
+			)
+			return
+		}
+		s.writeStoreError(w, err)
+		return
+	}
+	if err := validateNotificationTestConfig(channel, resolved); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_notification_config", err.Error())
+		return
+	}
+
+	switch channel {
+	case "webhook":
+		err = sendWebhookNotificationTest(r.Context(), resolved)
+	case "telegram":
+		err = sendTelegramNotificationTest(r.Context(), resolved)
+	case "email":
+		err = sendEmailNotificationTest(r.Context(), resolved)
+	case "bark":
+		err = sendBarkNotificationTest(r.Context(), resolved)
+	}
+	if err != nil {
+		redacted := store.RedactText(err.Error(), provider)
+		if s.logger != nil {
+			s.logger.Warn(
+				"notification connectivity test failed",
+				"channel",
+				channel,
+				"error",
+				redacted,
+			)
+		}
+		switch {
+		case errors.Is(err, errUnsafeDestination):
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"unsafe_destination",
+				"notification destination must resolve only to public network addresses",
+			)
+		case errors.Is(err, errProviderRejected):
+			writeError(
+				w,
+				http.StatusBadGateway,
+				"notification_provider_rejected",
+				"notification provider rejected the test message",
+			)
+		default:
+			writeError(
+				w,
+				http.StatusBadGateway,
+				"notification_test_failed",
+				"notification provider could not be reached or the test message failed",
+			)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"channel":   channel,
+			"success":   true,
+			"tested_at": time.Now().UTC(),
+		},
+	})
+}
+
+func (s *Server) resolveNotificationTestConfig(
+	ctx context.Context,
+	channel string,
+	incoming json.RawMessage,
+) (map[string]any, store.NotificationSetting, error) {
+	current, err := s.store.NotificationSetting(ctx, channel)
+	notConfigured := errors.Is(err, store.ErrNotFound)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, store.NotificationSetting{}, err
+	}
+	if notConfigured {
+		current = store.NotificationSetting{
+			Channel:         channel,
+			Config:          json.RawMessage(`{}`),
+			SensitiveFields: store.DefaultNotificationSensitiveFields(channel),
+		}
+	}
+	var resolved map[string]any
+	if err := json.Unmarshal(current.Config, &resolved); err != nil {
+		return nil, store.NotificationSetting{}, fmt.Errorf("decode stored notification config: %w", err)
+	}
+	var overlay map[string]any
+	if err := json.Unmarshal(incoming, &overlay); err != nil {
+		return nil, store.NotificationSetting{}, fmt.Errorf("decode notification test config: %w", err)
+	}
+	sensitive := make(map[string]struct{})
+	for _, field := range store.DefaultNotificationSensitiveFields(channel) {
+		sensitive[field] = struct{}{}
+	}
+	for key, value := range overlay {
+		if _, secret := sensitive[key]; secret {
+			if text, ok := value.(string); !ok || text == "" || text == store.SecretMask {
+				continue
+			}
+		}
+		resolved[key] = value
+	}
+	encoded, err := json.Marshal(resolved)
+	if err != nil {
+		return nil, store.NotificationSetting{}, err
+	}
+	if len(resolved) == 0 && notConfigured {
+		return nil, store.NotificationSetting{}, store.ErrNotFound
+	}
+	_, normalized, err := decodeNotificationConfig(channel, encoded, false)
+	if err != nil {
+		return nil, store.NotificationSetting{}, err
+	}
+	if err := json.Unmarshal(normalized, &resolved); err != nil {
+		return nil, store.NotificationSetting{}, err
+	}
+	provider := store.NotificationSetting{
+		Channel:         channel,
+		Config:          normalized,
+		SensitiveFields: store.DefaultNotificationSensitiveFields(channel),
+	}
+	return resolved, provider, nil
+}
+
+func validateNotificationTestConfig(channel string, config map[string]any) error {
+	switch channel {
+	case "webhook":
+		urls := configStrings(config, "urls")
+		if len(urls) == 0 {
+			return errors.New("webhook.urls must contain at least one URL")
+		}
+		if len(urls) > 8 {
+			return errors.New("webhook test is limited to 8 URLs")
+		}
+	case "bark":
+		urls := configStrings(config, "urls")
+		if len(urls) == 0 {
+			return errors.New("bark.urls must contain at least one URL")
+		}
+		if len(urls) > 8 {
+			return errors.New("bark test is limited to 8 URLs")
+		}
+	case "telegram":
+		token := configString(config, "bot_token")
+		if token == "" || token == store.SecretMask {
+			return errors.New("telegram.bot_token is required")
+		}
+		if !telegramTokenPattern.MatchString(token) {
+			return errors.New("telegram.bot_token has an invalid format")
+		}
+		if configString(config, "chat_id") == "" {
+			return errors.New("telegram.chat_id is required")
+		}
+		if baseURL := configString(config, "base_url"); baseURL != "" {
+			if _, err := parseOutboundURL(baseURL, true); err != nil {
+				return errors.New("telegram.base_url must be an absolute HTTPS URL")
+			}
+		}
+	case "email":
+		if configString(config, "smtp_host") == "" {
+			return errors.New("email.smtp_host is required")
+		}
+		if configString(config, "from_address") == "" {
+			return errors.New("email.from_address is required")
+		}
+		if len(configStrings(config, "to_addresses")) == 0 {
+			return errors.New("email.to_addresses must contain at least one address")
+		}
+		if configString(config, "password") != "" && configString(config, "username") == "" {
+			return errors.New("email.username is required when a password is configured")
+		}
+	}
+	return nil
+}
+
+func sendWebhookNotificationTest(ctx context.Context, config map[string]any) error {
+	timeout := durationMilliseconds(configInt(config, "timeout_ms"), 5*time.Second)
+	client, err := restrictedHTTPClient(ctx, timeout, "")
+	if err != nil {
+		return err
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"event":     "test",
+		"message":   "vocat notification test",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	})
+	for _, destination := range configStrings(config, "urls") {
+		parsed, err := validateOutboundURL(ctx, destination, false)
+		if err != nil {
+			return err
+		}
+		request, err := http.NewRequestWithContext(
+			ctx,
+			http.MethodPost,
+			parsed.String(),
+			bytes.NewReader(payload),
+		)
+		if err != nil {
+			return fmt.Errorf("create webhook test request: %w", err)
+		}
+		for name, value := range configStringMap(config, "headers") {
+			request.Header.Set(name, value)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("User-Agent", "vocat-notification-test/1")
+		if secret := configString(config, "secret"); secret != "" {
+			signature := hmac.New(sha256.New, []byte(secret))
+			_, _ = signature.Write(payload)
+			request.Header.Set(
+				"X-vocat-Signature",
+				"sha256="+hex.EncodeToString(signature.Sum(nil)),
+			)
+		}
+		if err := performNotificationRequest(client, request, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sendBarkNotificationTest(ctx context.Context, config map[string]any) error {
+	client, err := restrictedHTTPClient(ctx, 6*time.Second, "")
+	if err != nil {
+		return err
+	}
+	message := map[string]any{
+		"title": "vocat",
+		"body":  "vocat notification test",
+	}
+	if group := configString(config, "group"); group != "" {
+		message["group"] = group
+	}
+	if icon := configString(config, "icon"); icon != "" {
+		message["icon"] = icon
+	}
+	if level := configString(config, "level"); level != "" {
+		message["level"] = level
+	}
+	payload, _ := json.Marshal(message)
+	for _, destination := range configStrings(config, "urls") {
+		parsed, err := validateOutboundURL(ctx, destination, false)
+		if err != nil {
+			return err
+		}
+		request, err := http.NewRequestWithContext(
+			ctx,
+			http.MethodPost,
+			parsed.String(),
+			bytes.NewReader(payload),
+		)
+		if err != nil {
+			return fmt.Errorf("create bark test request: %w", err)
+		}
+		request.Header.Set("Content-Type", "application/json; charset=utf-8")
+		request.Header.Set("User-Agent", "vocat-notification-test/1")
+		if err := performNotificationRequest(client, request, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sendTelegramNotificationTest(ctx context.Context, config map[string]any) error {
+	baseURL := configString(config, "base_url")
+	if baseURL == "" {
+		baseURL = "https://api.telegram.org"
+	}
+	parsed, err := validateOutboundURL(ctx, baseURL, true)
+	if err != nil {
+		return err
+	}
+	token := configString(config, "bot_token")
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/bot" + token + "/sendMessage"
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	client, err := restrictedHTTPClient(ctx, 6*time.Second, configString(config, "proxy"))
+	if err != nil {
+		return err
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"chat_id": configString(config, "chat_id"),
+		"text":    "vocat notification test",
+	})
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		parsed.String(),
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		return fmt.Errorf("create Telegram test request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "vocat-notification-test/1")
+	return performNotificationRequest(client, request, true)
+}
+
+func performNotificationRequest(
+	client *http.Client,
+	request *http.Request,
+	requireTelegramOK bool,
+) error {
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("send notification test: %w", err)
+	}
+	defer response.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	if readErr != nil {
+		return fmt.Errorf("read notification response: %w", readErr)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("%w: HTTP %d", errProviderRejected, response.StatusCode)
+	}
+	if requireTelegramOK {
+		var result struct {
+			OK bool `json:"ok"`
+		}
+		if json.Unmarshal(body, &result) != nil || !result.OK {
+			return fmt.Errorf("%w: Telegram response was not successful", errProviderRejected)
+		}
+	}
+	return nil
+}
+
+func sendEmailNotificationTest(ctx context.Context, config map[string]any) error {
+	host := strings.TrimSpace(configString(config, "smtp_host"))
+	port := configInt(config, "smtp_port")
+	if port == 0 {
+		port = 587
+	}
+	timeout := 8 * time.Second
+	address := net.JoinHostPort(host, strconv.Itoa(port))
+	connection, err := dialRestricted(ctx, "tcp", address, timeout)
+	if err != nil {
+		return fmt.Errorf("connect SMTP server: %w", err)
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("set SMTP deadline: %w", err)
+	}
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: host,
+	}
+	if port == 465 {
+		secure := tls.Client(connection, tlsConfig)
+		if err := secure.HandshakeContext(ctx); err != nil {
+			return fmt.Errorf("establish SMTP TLS: %w", err)
+		}
+		connection = secure
+	}
+	client, err := smtp.NewClient(connection, host)
+	if err != nil {
+		return fmt.Errorf("start SMTP session: %w", err)
+	}
+	defer client.Close()
+	if port != 465 {
+		if available, _ := client.Extension("STARTTLS"); !available {
+			return errors.New("SMTP server does not offer STARTTLS")
+		}
+		if err := client.StartTLS(tlsConfig); err != nil {
+			return fmt.Errorf("start SMTP TLS: %w", err)
+		}
+	}
+	username := configString(config, "username")
+	password := configString(config, "password")
+	if username != "" {
+		if err := client.Auth(smtp.PlainAuth("", username, password, host)); err != nil {
+			return fmt.Errorf("%w: SMTP authentication failed", errProviderRejected)
+		}
+	}
+	from, err := mail.ParseAddress(configString(config, "from_address"))
+	if err != nil {
+		return fmt.Errorf("parse sender address: %w", err)
+	}
+	recipients := make([]*mail.Address, 0)
+	for _, item := range configStrings(config, "to_addresses") {
+		address, err := mail.ParseAddress(item)
+		if err != nil {
+			return fmt.Errorf("parse recipient address: %w", err)
+		}
+		recipients = append(recipients, address)
+	}
+	if err := client.Mail(from.Address); err != nil {
+		return fmt.Errorf("%w: SMTP sender rejected", errProviderRejected)
+	}
+	for _, recipient := range recipients {
+		if err := client.Rcpt(recipient.Address); err != nil {
+			return fmt.Errorf("%w: SMTP recipient rejected", errProviderRejected)
+		}
+	}
+	writer, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("%w: SMTP message rejected", errProviderRejected)
+	}
+	message := strings.Join([]string{
+		"Date: " + time.Now().UTC().Format(time.RFC1123Z),
+		"From: " + from.String(),
+		"To: " + joinMailAddresses(recipients),
+		"Subject: vocat notification test",
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=UTF-8",
+		"",
+		"This is a vocat notification test.",
+		"",
+	}, "\r\n")
+	if _, err := io.WriteString(writer, message); err != nil {
+		_ = writer.Close()
+		return fmt.Errorf("write SMTP test message: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("%w: SMTP message not accepted", errProviderRejected)
+	}
+	if err := client.Quit(); err != nil {
+		return fmt.Errorf("finish SMTP session: %w", err)
+	}
+	return nil
+}
+
+func joinMailAddresses(values []*mail.Address) string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, value.String())
+	}
+	return strings.Join(result, ", ")
+}
+
+func restrictedHTTPClient(
+	ctx context.Context,
+	timeout time.Duration,
+	proxy string,
+) (*http.Client, error) {
+	timeout = clampNotificationTimeout(timeout)
+	transport := &http.Transport{
+		Proxy:                 nil,
+		DialContext:           restrictedDialer(timeout),
+		ForceAttemptHTTP2:     true,
+		DisableKeepAlives:     true,
+		MaxIdleConns:          0,
+		TLSHandshakeTimeout:   timeout,
+		ResponseHeaderTimeout: timeout,
+		ExpectContinueTimeout: time.Second,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+	if strings.TrimSpace(proxy) != "" {
+		parsed, err := validateOutboundURL(ctx, proxy, false)
+		if err != nil {
+			return nil, fmt.Errorf("validate notification proxy: %w", err)
+		}
+		transport.Proxy = http.ProxyURL(parsed)
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return errors.New("notification provider redirects are not allowed")
+		},
+	}, nil
+}
+
+func clampNotificationTimeout(timeout time.Duration) time.Duration {
+	if timeout < 100*time.Millisecond {
+		return 100 * time.Millisecond
+	}
+	if timeout > 10*time.Second {
+		return 10 * time.Second
+	}
+	return timeout
+}
+
+func durationMilliseconds(value int, fallback time.Duration) time.Duration {
+	if value == 0 {
+		return fallback
+	}
+	return time.Duration(value) * time.Millisecond
+}
+
+func validateOutboundURL(
+	ctx context.Context,
+	raw string,
+	requireHTTPS bool,
+) (*url.URL, error) {
+	parsed, err := parseOutboundURL(raw, requireHTTPS)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := resolvePublicAddresses(ctx, parsed.Hostname()); err != nil {
+		return nil, err
+	}
+	return parsed, nil
+}
+
+func parseOutboundURL(raw string, requireHTTPS bool) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Hostname() == "" || parsed.IsAbs() == false {
+		return nil, errors.New("destination must be an absolute HTTP URL")
+	}
+	if parsed.User != nil {
+		return nil, errors.New("destination URL cannot contain user information")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, errors.New("destination URL must use HTTP or HTTPS")
+	}
+	if requireHTTPS && parsed.Scheme != "https" {
+		return nil, errors.New("destination URL must use HTTPS")
+	}
+	if parsed.Port() != "" {
+		port, err := strconv.Atoi(parsed.Port())
+		if err != nil || port < 1 || port > 65535 {
+			return nil, errors.New("destination URL has an invalid port")
+		}
+	}
+	return parsed, nil
+}
+
+func restrictedDialer(timeout time.Duration) func(
+	context.Context,
+	string,
+	string,
+) (net.Conn, error) {
+	return func(ctx context.Context, network string, address string) (net.Conn, error) {
+		return dialRestricted(ctx, network, address, timeout)
+	}
+}
+
+func dialRestricted(
+	ctx context.Context,
+	network string,
+	address string,
+	timeout time.Duration,
+) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("parse outbound address: %w", err)
+	}
+	addresses, err := resolvePublicAddresses(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	dialer := net.Dialer{Timeout: clampNotificationTimeout(timeout)}
+	var failures []error
+	for _, ip := range addresses {
+		connection, err := dialer.DialContext(
+			ctx,
+			network,
+			net.JoinHostPort(ip.String(), port),
+		)
+		if err == nil {
+			return connection, nil
+		}
+		failures = append(failures, err)
+	}
+	return nil, fmt.Errorf("dial public notification destination: %w", errors.Join(failures...))
+}
+
+func resolvePublicAddresses(ctx context.Context, host string) ([]netip.Addr, error) {
+	normalized := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if normalized == "" || normalized == "localhost" ||
+		strings.HasSuffix(normalized, ".localhost") ||
+		normalized == "metadata" ||
+		strings.HasSuffix(normalized, ".internal") ||
+		strings.HasSuffix(normalized, ".local") {
+		return nil, fmt.Errorf("%w: blocked host name", errUnsafeDestination)
+	}
+	if literal, err := netip.ParseAddr(normalized); err == nil {
+		literal = literal.Unmap()
+		if !publicNotificationAddress(literal) {
+			return nil, fmt.Errorf("%w: %s", errUnsafeDestination, literal)
+		}
+		return []netip.Addr{literal}, nil
+	}
+	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", normalized)
+	if err != nil {
+		return nil, fmt.Errorf("resolve notification destination: %w", err)
+	}
+	if len(addresses) == 0 {
+		return nil, errors.New("notification destination did not resolve")
+	}
+	result := make([]netip.Addr, 0, len(addresses))
+	for _, address := range addresses {
+		address = address.Unmap()
+		if !publicNotificationAddress(address) {
+			return nil, fmt.Errorf("%w: %s", errUnsafeDestination, address)
+		}
+		result = append(result, address)
+	}
+	return result, nil
+}
+
+var blockedNotificationNetworks = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+}
+
+func publicNotificationAddress(address netip.Addr) bool {
+	if !address.IsValid() || !address.IsGlobalUnicast() {
+		return false
+	}
+	address = address.Unmap()
+	for _, blocked := range blockedNotificationNetworks {
+		if blocked.Contains(address) {
+			return false
+		}
+	}
+	return true
+}
+
+func configString(config map[string]any, key string) string {
+	value, _ := config[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func configStrings(config map[string]any, key string) []string {
+	switch value := config[key].(type) {
+	case []string:
+		return value
+	case []any:
+		result := make([]string, 0, len(value))
+		for _, item := range value {
+			text, ok := item.(string)
+			if ok {
+				result = append(result, strings.TrimSpace(text))
+			}
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
+func configStringMap(config map[string]any, key string) map[string]string {
+	object, ok := config[key].(map[string]any)
+	if !ok {
+		return nil
+	}
+	result := make(map[string]string, len(object))
+	for name, value := range object {
+		text, ok := value.(string)
+		if ok {
+			result[name] = text
+		}
+	}
+	return result
+}
+
+func configInt(config map[string]any, key string) int {
+	switch value := config[key].(type) {
+	case float64:
+		return int(value)
+	case json.Number:
+		result, _ := value.Int64()
+		return int(result)
+	case int:
+		return value
+	default:
+		return 0
+	}
+}
+
+// handleCardPolicies returns every stored card policy (VoHive: GET /cards/policies).
+func (s *Server) handleCardPolicies(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	policies, err := s.store.ListCardPolicies(r.Context())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	result := make([]map[string]any, 0, len(policies))
+	for _, policy := range policies {
+		result = append(result, cardPolicyResponse(policy))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": result})
+}
+
+// liveCardPolicyFlags resolves the current VoWiFi/airplane state for the
+// device that presently hosts the given SIM (matched by live ICCID), so the card
+// policy toggles reflect what the card is actually doing now rather than a stale
+// stored value. ok is false when no present device reports this ICCID.
+func (s *Server) liveCardPolicyFlags(ctx context.Context, iccid string) (vowifi, airplane, ok bool) {
+	configs, err := s.store.ListDevices(ctx)
+	if err != nil {
+		return false, false, false
+	}
+	clean := strings.TrimSpace(iccid)
+	for _, config := range configs {
+		entry, _, present := s.physicalForConfig(config)
+		if !present || entry.Snapshot == nil {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(entry.Snapshot.ICCID), clean) {
+			continue
+		}
+		// VoWiFi deliberately puts the modem into RF-off mode while the SWu/IMS
+		// path owns service. That physical CFUN state is not the user's separate
+		// airplane-mode policy; exposing both toggles as enabled is contradictory
+		// and makes the UI unable to represent the active policy correctly.
+		return config.VoWiFiEnabled, entry.Snapshot.FlightMode && !config.VoWiFiEnabled, true
+	}
+	return false, false, false
+}
+
+func (s *Server) handleCardPolicy(w http.ResponseWriter, r *http.Request, iccid string) {
+	iccid = strings.TrimSpace(iccid)
+	if !validICCID(iccid) {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"invalid_iccid",
+			"ICCID must contain between 10 and 32 decimal digits",
+		)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		policy, err := s.store.CardPolicy(r.Context(), iccid)
+		if errors.Is(err, store.ErrNotFound) {
+			policy = store.CardPolicy{
+				ICCID:     iccid,
+				IPVersion: "IPV4V6",
+				Source:    "default",
+			}
+		} else if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		// Reflect the SIM's live current state in the toggles (APN / IP version
+		// remain stored preferences); fall back to the stored policy when the card
+		// is not currently present in any device.
+		if vowifi, airplane, ok := s.liveCardPolicyFlags(r.Context(), iccid); ok {
+			policy.VoWiFiEnabled = vowifi
+			policy.AirplaneEnabled = airplane
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": cardPolicyResponse(policy)})
+	case http.MethodPut:
+		var request struct {
+			VoWiFiEnabled   *bool  `json:"vowifi_enabled"`
+			AirplaneEnabled *bool  `json:"airplane_enabled"`
+			APN             string `json:"apn"`
+			IPVersion       string `json:"ip_version"`
+		}
+		if err := s.decodeJSON(w, r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		if request.VoWiFiEnabled == nil ||
+			request.AirplaneEnabled == nil {
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"invalid_card_policy",
+				"all card policy switches are required",
+			)
+			return
+		}
+		request.APN = strings.TrimSpace(request.APN)
+		if len(request.APN) > 128 || strings.ContainsAny(request.APN, "\r\n\x00") {
+			writeError(w, http.StatusBadRequest, "invalid_card_policy", "APN is invalid")
+			return
+		}
+		request.IPVersion = strings.ToUpper(strings.TrimSpace(request.IPVersion))
+		if request.IPVersion == "" {
+			request.IPVersion = "IPV4V6"
+		}
+		if request.IPVersion != "IP" &&
+			request.IPVersion != "IPV6" &&
+			request.IPVersion != "IPV4V6" {
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"invalid_card_policy",
+				"IP version must be IP, IPV6, or IPV4V6",
+			)
+			return
+		}
+		if *request.VoWiFiEnabled && *request.AirplaneEnabled {
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"invalid_card_policy",
+				"VoWiFi and airplane mode cannot both be enabled",
+			)
+			return
+		}
+		policy := store.CardPolicy{
+			ICCID:           iccid,
+			NetworkEnabled:  false,
+			VoWiFiEnabled:   *request.VoWiFiEnabled,
+			AirplaneEnabled: *request.AirplaneEnabled,
+			APN:             request.APN,
+			IPVersion:       request.IPVersion,
+			Source:          "manual",
+		}
+		if err := s.store.UpsertCardPolicy(r.Context(), policy); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		policy, err := s.store.CardPolicy(r.Context(), iccid)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": cardPolicyResponse(policy)})
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	}
+}
+
+func validICCID(value string) bool {
+	if len(value) < 10 || len(value) > 32 {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func cardPolicyResponse(policy store.CardPolicy) map[string]any {
+	response := map[string]any{
+		"iccid":            policy.ICCID,
+		"network_enabled":  false,
+		"vowifi_enabled":   policy.VoWiFiEnabled,
+		"airplane_enabled": policy.AirplaneEnabled,
+		"apn":              policy.APN,
+		"ip_version":       policy.IPVersion,
+		"source":           policy.Source,
+	}
+	if !policy.CreatedAt.IsZero() {
+		response["created_at"] = policy.CreatedAt
+	}
+	if !policy.UpdatedAt.IsZero() {
+		response["updated_at"] = policy.UpdatedAt
+	}
+	return response
+}
+
+func (s *Server) handleTrafficAnalysis(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	rangeName := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("range")))
+	if rangeName == "" {
+		rangeName = "day"
+	}
+	var window time.Duration
+	switch rangeName {
+	case "hour":
+		window = time.Hour
+	case "day":
+		window = 24 * time.Hour
+	case "week":
+		window = 7 * 24 * time.Hour
+	case "month":
+		window = 30 * 24 * time.Hour
+	default:
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"invalid_range",
+			"traffic range must be hour, day, week, or month",
+		)
+		return
+	}
+	deviceID := strings.TrimSpace(r.URL.Query().Get("device_id"))
+	if len(deviceID) > 128 || strings.ContainsAny(deviceID, "\x00\r\n") {
+		writeError(w, http.StatusBadRequest, "invalid_device", "device ID is invalid")
+		return
+	}
+	now := time.Now().UTC()
+	rows, err := s.store.ListTrafficBuckets(r.Context(), store.TrafficFilter{
+		DeviceID: deviceID,
+		Bucket:   rangeName,
+		Since:    now.Add(-window),
+		Until:    now.Add(time.Minute),
+		Limit:    1000,
+	})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	type aggregate struct {
+		period time.Time
+		rx     int64
+		tx     int64
+	}
+	byPeriod := make(map[int64]*aggregate)
+	for _, row := range rows {
+		key := row.PeriodStart.Unix()
+		value := byPeriod[key]
+		if value == nil {
+			value = &aggregate{period: row.PeriodStart}
+			byPeriod[key] = value
+		}
+		value.rx += row.RXBytes
+		value.tx += row.TXBytes
+	}
+	values := make([]*aggregate, 0, len(byPeriod))
+	for _, value := range byPeriod {
+		values = append(values, value)
+	}
+	sort.Slice(values, func(left, right int) bool {
+		return values[left].period.Before(values[right].period)
+	})
+	buckets := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		buckets = append(buckets, map[string]any{
+			"bucket":       rangeName,
+			"period_start": value.period,
+			"rx_bytes":     value.rx,
+			"tx_bytes":     value.tx,
+			"total_bytes":  value.rx + value.tx,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"status":  "ok",
+			"range":   rangeName,
+			"buckets": buckets,
+		},
+	})
+}

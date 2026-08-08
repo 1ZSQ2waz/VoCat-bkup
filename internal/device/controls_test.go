@@ -1,0 +1,78 @@
+package device
+
+import (
+	"context"
+	"testing"
+)
+
+func TestSetFlightPreservesRawCFUNZero(t *testing.T) {
+	client := &transcriptClient{steps: []clientStep{
+		{command: "AT+CFUN?", response: okResponse("+CFUN: 0")},
+		{command: "AT+CFUN?", response: okResponse("+CFUN: 0")},
+	}}
+	manager, id := newStartedTestManager(t, client)
+
+	result, err := manager.SetFlight(context.Background(), id, true)
+	if err != nil {
+		t.Fatalf("SetFlight: %v", err)
+	}
+	if result.Changed || result.PreviousMode != 0 || result.CurrentMode != 0 ||
+		!result.FlightMode || !result.RadioOff {
+		t.Fatalf("result = %#v", result)
+	}
+	client.assertDone(t)
+}
+
+func TestSetFlightRestoresPreviousFunctionalMode(t *testing.T) {
+	client := &transcriptClient{steps: []clientStep{
+		{command: "AT+CFUN?", response: okResponse("+CFUN: 1")},
+		{command: "AT+CFUN=4", response: okResponse()},
+		{command: "AT+CFUN?", response: okResponse("+CFUN: 4")},
+		{command: "AT+CFUN?", response: okResponse("+CFUN: 4")},
+		{command: "AT+CFUN=1", response: okResponse()},
+		{command: "AT+CFUN?", response: okResponse("+CFUN: 1")},
+	}}
+	manager, id := newStartedTestManager(t, client)
+
+	enabled, err := manager.SetFlight(context.Background(), id, true)
+	if err != nil {
+		t.Fatalf("enable flight mode: %v", err)
+	}
+	if !enabled.Changed || enabled.PreviousMode != 1 ||
+		enabled.CurrentMode != 4 || !enabled.FlightMode {
+		t.Fatalf("enable result = %#v", enabled)
+	}
+	disabled, err := manager.SetFlight(context.Background(), id, false)
+	if err != nil {
+		t.Fatalf("disable flight mode: %v", err)
+	}
+	if !disabled.Changed || disabled.PreviousMode != 4 ||
+		disabled.CurrentMode != 1 || disabled.FlightMode {
+		t.Fatalf("disable result = %#v", disabled)
+	}
+	client.assertDone(t)
+}
+
+func TestUSSDWaitsForAndDecodesCUSD(t *testing.T) {
+	client := &transcriptClient{
+		steps: []clientStep{{
+			command:  `AT+CUSD=1,"*100#",15`,
+			response: okResponse(),
+		}},
+		urcs: []string{`+CUSD: 0,"004F004B",72`},
+	}
+	manager, id := newStartedTestManager(t, client)
+
+	result, err := manager.USSD(context.Background(), id, "*100#")
+	if err != nil {
+		t.Fatalf("USSD: %v", err)
+	}
+	if result.Text != "OK" || result.Code != "*100#" ||
+		result.DCS == nil || *result.DCS != 72 {
+		t.Fatalf("result = %#v", result)
+	}
+	if _, err := manager.USSD(context.Background(), id, "*100#\rAT"); err == nil {
+		t.Fatal("expected invalid service code rejection")
+	}
+	client.assertDone(t)
+}

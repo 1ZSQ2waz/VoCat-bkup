@@ -1,0 +1,45 @@
+# ---- Binaries / build outputs ----
+/vocat
+/vocat.exe
+/build/vocat
+/build/vocat-linux-amd64
+/build/vocat-linux-amd64.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# ---- Cookie / secret files (NEVER commit) ----
+vc.jar
+*.cookies
+*.session
+
+# ---- Frontend build products ----
+web/dist/
+web/build/
+web/node_modules/
+
+# ---- Go build ----
+*.test
+*.out
+
+# ---- Python (build/ helpers) ----
+build/__pycache__/
+__pycache__/
+*.pyc
+
+# ---- Docs / scratch ----
+*.md
+*.txt
+build/lists/
+
+# ---- Editor / IDE ----
+.vscode/
+.idea/
+
+# ---- OS junk ----
+.DS_Store
+Thumbs.db
+
+# ---- Claude Code / agent ----
+.claude/
