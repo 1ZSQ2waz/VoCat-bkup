@@ -47,7 +47,7 @@ function UpstreamRowCard({
         </div>
         <div className="mx-0.5 hidden h-3.5 w-px bg-gray-200 dark:bg-gray-700 sm:block" />
         <Button size="small" icon={<DesktopRegular />} onClick={() => onOpenBindings(row)}>
-          {t("设备绑定")}
+          <span className="hidden sm:inline">{t("设备绑定")}</span>
         </Button>
         <Button size="small" icon={<EditRegular />} onClick={() => onEdit(row)} />
         <Button size="small" variant="danger" icon={<DeleteRegular />} onClick={() => onDelete(row)} />
@@ -64,8 +64,8 @@ export function UpstreamSection({ rows, loading, error, onRetry, onNew, onEdit, 
         <ErrorState className="mb-6" title={t("加载上游代理失败")} message={error.message} statusCode={error.status} retryText={t("重试")} onRetry={onRetry} />
       ) : null}
       <div className="ui-card p-6">
-        <div className="mb-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-[#0ea5e9] to-[#0284c7] text-white shadow-lg shadow-indigo-500/25">
               <GlobeRegular className="text-[20px]" />
             </div>

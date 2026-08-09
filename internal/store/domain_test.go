@@ -291,6 +291,43 @@ func TestSMSPersistenceAndDerivedThreads(t *testing.T) {
 	}
 }
 
+func TestListInboundSMSAfterIDUsesDurableInsertionCursor(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t, ":memory:")
+	mustSaveDevice(t, database, "ec20-1", "EC20")
+	old, err := database.SaveSMSMessage(ctx, SMSMessage{
+		MessageID: "old-inbound", DeviceID: "ec20-1", Peer: "10086",
+		Direction: "inbound", Body: "old", Status: "received",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.SaveSMSMessage(ctx, SMSMessage{
+		MessageID: "new-outbound", DeviceID: "ec20-1", Peer: "10010",
+		Direction: "outbound", Body: "sent", Status: "sent",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newInbound, err := database.SaveSMSMessage(ctx, SMSMessage{
+		MessageID: "new-inbound", DeviceID: "ec20-1", Peer: "95533",
+		Direction: "received", Body: "new", Status: "received",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest, err := database.LatestSMSMessageID(ctx)
+	if err != nil || latest != newInbound.ID {
+		t.Fatalf("LatestSMSMessageID() = %d, %v; want %d", latest, err, newInbound.ID)
+	}
+	messages, err := database.ListInboundSMSAfterID(ctx, old.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].ID != newInbound.ID {
+		t.Fatalf("ListInboundSMSAfterID() = %#v", messages)
+	}
+}
+
 func TestApplySMSDeliveryReportTracksEverySubmittedPart(t *testing.T) {
 	ctx := context.Background()
 	database := openTestStore(t, ":memory:")

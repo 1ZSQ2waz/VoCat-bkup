@@ -254,9 +254,26 @@ func validateNotificationField(
 		if len(value) > limit || strings.ContainsAny(value, "\x00") {
 			return fmt.Errorf("%s is too long or contains invalid characters", field)
 		}
-		if (name == "base_url" || name == "proxy") && value != "" {
+		if name == "base_url" && value != "" {
+			if _, err := parseOutboundURL(value, true); err != nil {
+				return fmt.Errorf("%s must be an absolute HTTPS URL", field)
+			}
+		}
+		if name == "proxy" && value != "" {
 			if _, err := parseOutboundURL(value, false); err != nil {
 				return fmt.Errorf("%s is not a valid HTTP URL", field)
+			}
+		}
+		if channel == "telegram" && name == "chat_id" && strings.TrimSpace(value) != "" {
+			chatID, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if err != nil || chatID == 0 {
+				return fmt.Errorf("%s must be a non-zero integer", field)
+			}
+		}
+		if channel == "telegram" && name == "admin_id" && strings.TrimSpace(value) != "" {
+			adminID, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if err != nil || adminID <= 0 {
+				return fmt.Errorf("%s must be a positive integer", field)
 			}
 		}
 		if name == "from_address" && value != "" {

@@ -150,7 +150,7 @@ export function formsFromNotifications(data: Partial<NotificationSettings>): Not
       retryMax: num(webhook.retryMax, 3),
       textTemplate:
         webhook.textTemplate === null || webhook.textTemplate === undefined
-          ? "{{device_label}} {{text}}"
+          ? "收到新短信\n设备  {{device_label}}\n号码  {{number}}\n时间  {{time}}\n内容  {{text}}"
           : String(webhook.textTemplate),
       headers: recordToHeaderRows(webhook.headers),
     },

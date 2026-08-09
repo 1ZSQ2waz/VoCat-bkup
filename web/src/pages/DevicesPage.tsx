@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowSyncRegular, AddRegular } from "@fluentui/react-icons";
+import { ArrowSyncRegular, AddRegular, ChevronLeftRegular } from "@fluentui/react-icons";
 import { api, apiMessage, camelize } from "../api";
 import type { CardPolicy, DeviceConfig, DeviceListItem, DiscoveredDevice } from "../types";
 import { usePolling } from "../lib/usePolling";
+import { useMediaQuery } from "../lib/useMediaQuery";
 import { Button, PageHeader, RefreshButton, ErrorState, ListSkeleton, Tabs, confirmDialog, message } from "../components/ui";
 import { DeviceListPanel, type StatusFilter, type SortDir, type SortKey } from "../components/devices/DeviceListPanel";
 import { DeviceDetailHeader } from "../components/devices/DeviceDetailHeader";
@@ -75,6 +76,17 @@ export default function DevicesPage() {
   activeTabRef.current = activeTab;
   const searchParamsRef = useRef(searchParams);
   searchParamsRef.current = searchParams;
+
+  const isMobile = useMediaQuery("(max-width: 767px)");
+
+  const handleBackToList = useCallback(() => {
+    setSelectedId("");
+    const p = new URLSearchParams(searchParamsRef.current);
+    p.delete("device");
+    p.delete("tab");
+    setSearchParams(p, { replace: true });
+    setDetail(null);
+  }, [setSearchParams]);
 
   const loadDetail = useCallback(async (id: string) => {
     if (!id) {
@@ -633,23 +645,30 @@ export default function DevicesPage() {
         />
       ) : null}
       <div className="devices-layout">
-        <DeviceListPanel
-          loading={listLoading}
-          query={query}
-          statusFilter={statusFilter}
-          sortKey={sortKey}
-          sortDir={sortDir}
-          selectedId={selectedId}
-          filteredDevices={filteredDevices}
-          deviceCount={list.length}
-          deviceLimit={deviceLimit}
-          onQueryChange={setQuery}
-          onStatusFilterChange={setStatusFilter}
-          onSortKeyChange={setSortKey}
-          onSortDirChange={setSortDir}
-          onSelectDevice={(id) => selectDevice(id)}
-        />
-        <div className="min-w-0 space-y-4">
+        {(!isMobile || !selectedId) && (
+          <DeviceListPanel
+            loading={listLoading}
+            query={query}
+            statusFilter={statusFilter}
+            sortKey={sortKey}
+            sortDir={sortDir}
+            selectedId={selectedId}
+            filteredDevices={filteredDevices}
+            deviceCount={list.length}
+            deviceLimit={deviceLimit}
+            onQueryChange={setQuery}
+            onStatusFilterChange={setStatusFilter}
+            onSortKeyChange={setSortKey}
+            onSortDirChange={setSortDir}
+            onSelectDevice={(id) => selectDevice(id)}
+          />
+        )}
+        <div className={`min-w-0 space-y-4 ${isMobile && selectedId ? "" : isMobile ? "hidden" : ""}`}>
+          {isMobile && selectedId && detail ? (
+            <Button variant="text" onClick={handleBackToList} icon={<ChevronLeftRegular />}>
+              {t("返回")}
+            </Button>
+          ) : null}
           {detail ? (
             <>
               <DeviceDetailHeader

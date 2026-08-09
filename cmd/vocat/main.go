@@ -19,6 +19,7 @@ import (
 	"vocat/internal/loghub"
 	"vocat/internal/server"
 	"vocat/internal/store"
+	"vocat/internal/update"
 	"vocat/internal/vowifi"
 	"vocat/internal/vowifi/ike"
 	"vocat/internal/vowifi/ims"
@@ -30,10 +31,44 @@ import (
 func main() {
 	logs := loghub.New(slog.NewJSONHandler(os.Stdout, nil), 2000)
 	logger := slog.New(logs)
-	if err := run(logger, logs); err != nil {
-		logger.Error("server stopped", "error", err)
-		os.Exit(1)
+
+	args := os.Args[1:]
+	switch subcommand, rest := splitSubcommand(args); subcommand {
+	case "":
+		// No subcommand: run the server. Backward-compatible with the
+		// existing systemd unit (ExecStart=/opt/vocat/bin/vocat).
+		if err := run(logger, logs); err != nil {
+			logger.Error("server stopped", "error", err)
+			os.Exit(1)
+		}
+	case "version", "-v", "--version":
+		runVersion()
+	case "update":
+		if err := update.Run(logger, rest); err != nil {
+			logger.Error("update failed", "error", err)
+			os.Exit(1)
+		}
+	case "menu":
+		if err := runMenu(logger); err != nil {
+			logger.Error("menu failed", "error", err)
+			os.Exit(1)
+		}
+	case "help", "-h", "--help":
+		printUsage(os.Stdout)
+	default:
+		fmt.Fprintf(os.Stderr, "vocat: unknown subcommand %q\n\n", subcommand)
+		printUsage(os.Stderr)
+		os.Exit(2)
 	}
+}
+
+// splitSubcommand returns the first non-flag token as the subcommand and the
+// remaining args. An empty arg list yields ("", nil) → server mode.
+func splitSubcommand(args []string) (string, []string) {
+	if len(args) == 0 {
+		return "", nil
+	}
+	return args[0], args[1:]
 }
 
 func run(logger *slog.Logger, logs *loghub.Hub) error {
@@ -125,6 +160,8 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	}
 	go handler.StartLogRetentionLoop(pollContext, time.Minute)
 	go handler.StartSMSSyncLoop(pollContext, 15*time.Second)
+	handler.StartTelegramBot(pollContext)
+	handler.StartSMSNotificationDispatchers(pollContext)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Address,

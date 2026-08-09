@@ -162,6 +162,47 @@ func (s *Store) SMSMessage(ctx context.Context, id int64) (SMSMessage, error) {
 	return scanSMSMessage(s.db.QueryRowContext(ctx, smsMessageSelect+` WHERE id = ?`, id))
 }
 
+// LatestSMSMessageID returns the current durable cursor used by notification
+// consumers. Starting at this value avoids replaying the entire SMS archive
+// whenever the service or a notification provider is restarted.
+func (s *Store) LatestSMSMessageID(ctx context.Context) (int64, error) {
+	var id int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM sms_messages`).Scan(&id); err != nil {
+		return 0, fmt.Errorf("read latest SMS id: %w", err)
+	}
+	return id, nil
+}
+
+// ListInboundSMSAfterID returns newly inserted inbound messages in durable ID
+// order. Telegram advances this cursor only after considering each item, so
+// timestamp corrections and duplicate modem synchronisations cannot reorder or
+// duplicate notifications.
+func (s *Store) ListInboundSMSAfterID(ctx context.Context, afterID int64, limit int) ([]SMSMessage, error) {
+	if afterID < 0 {
+		afterID = 0
+	}
+	rows, err := s.db.QueryContext(ctx, smsMessageSelect+`
+		WHERE id > ? AND direction IN ('inbound', 'received')
+		ORDER BY id ASC
+		LIMIT ?`, afterID, normalizedLimit(limit))
+	if err != nil {
+		return nil, fmt.Errorf("list new inbound SMS messages: %w", err)
+	}
+	defer rows.Close()
+	values := make([]SMSMessage, 0)
+	for rows.Next() {
+		value, scanErr := scanSMSMessage(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan new inbound SMS message: %w", scanErr)
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate new inbound SMS messages: %w", err)
+	}
+	return values, nil
+}
+
 // ApplySMSDeliveryReport attaches a TP-STATUS report to the newest matching
 // outbound submission and advances its aggregate delivery state. Multipart
 // messages become delivered only after every submitted part is reported.

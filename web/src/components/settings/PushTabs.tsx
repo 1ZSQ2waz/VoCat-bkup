@@ -21,6 +21,15 @@ function hasAnyUrl(urls: string[]): boolean {
   return Array.isArray(urls) && urls.some((url) => String(url || "").trim().length > 0);
 }
 
+function SMSOnlyHint() {
+  const { t } = useI18n();
+  return (
+    <div className="mb-4 rounded-lg bg-gray-50 px-3 py-2 text-xs leading-5 text-gray-500 dark:bg-gray-800/60 dark:text-gray-400">
+      {t("该渠道只推送新收到的短信，不提供设备控制功能。每条短信都会单独推送，不按内容合并。")}
+    </div>
+  );
+}
+
 const BARK_LEVEL_OPTIONS = [
   { value: "timeSensitive", label: "Time-Sensitive (timeSensitive)" },
   { value: "active", label: "Active (active)" },
@@ -42,6 +51,7 @@ export function BarkTab({ value, onChange, testing, onTest }: PushChannelProps<B
           </Button>
         }
       />
+      <SMSOnlyHint />
       <div className="space-y-4">
         <UrlListEditor
           urls={value.urls}
@@ -87,6 +97,7 @@ export function EmailTab({ value, onChange, testing, onTest }: PushChannelProps<
           </Button>
         }
       />
+      <SMSOnlyHint />
       <div className="space-y-4">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-10">
           <Field label={t("SMTP 主机")} className="sm:col-span-5">
@@ -152,6 +163,7 @@ export function WebhookTab({ value, onChange, testing, onTest }: PushChannelProp
           </Button>
         }
       />
+      <SMSOnlyHint />
       <div className="space-y-4">
         <UrlListEditor
           urls={value.urls}
@@ -204,13 +216,13 @@ export function WebhookTab({ value, onChange, testing, onTest }: PushChannelProp
             lang === "zh" ? (
               <>
                 支持占位符：<code>{"{{text}}"}</code>、<code>{"{{event}}"}</code>、<code>{"{{timestamp}}"}</code>、<code>{"{{device_id}}"}</code>、
-                <code>{"{{device_name}}"}</code>、<code>{"{{device_label}}"}</code>。留空则直接发送原始 text。
+                <code>{"{{device_name}}"}</code>、<code>{"{{device_label}}"}</code>、<code>{"{{number}}"}</code>、<code>{"{{time}}"}</code>。留空则使用标准短信模板。
               </>
             ) : (
               <>
                 Supported placeholders: <code>{"{{text}}"}</code>, <code>{"{{event}}"}</code>, <code>{"{{timestamp}}"}</code>,{" "}
-                <code>{"{{device_id}}"}</code>, <code>{"{{device_name}}"}</code>, <code>{"{{device_label}}"}</code>. Leave empty to send the
-                raw text.
+                <code>{"{{device_id}}"}</code>, <code>{"{{device_name}}"}</code>, <code>{"{{device_label}}"}</code>, <code>{"{{number}}"}</code>, and
+                <code>{"{{time}}"}</code>. Leave empty to use the standard SMS template.
               </>
             )
           }
@@ -220,7 +232,7 @@ export function WebhookTab({ value, onChange, testing, onTest }: PushChannelProp
             onChange={(e) => onChange({ textTemplate: e.target.value })}
             disabled={off}
             rows={2}
-            placeholder="{{device_label}} {{text}}"
+            placeholder={"收到新短信\n设备  {{device_label}}\n号码  {{number}}\n时间  {{time}}\n内容  {{text}}"}
           />
         </Field>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

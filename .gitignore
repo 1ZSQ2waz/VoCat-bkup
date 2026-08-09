@@ -1,6 +1,8 @@
 # ---- Binaries / build outputs ----
 /vocat
 /vocat.exe
+/build/
+/release.py
 /build/vocat
 /build/vocat-linux-amd64
 /build/vocat-linux-amd64.exe
@@ -27,9 +29,13 @@ web/node_modules/
 build/__pycache__/
 __pycache__/
 *.pyc
+# Local-only helpers carry internal hostnames/credentials and must never be
+# committed. The whole build directory and the root release.py are ignored.
+build/*.py
 
 # ---- Docs / scratch ----
 *.md
+!README.md
 *.txt
 build/lists/
 

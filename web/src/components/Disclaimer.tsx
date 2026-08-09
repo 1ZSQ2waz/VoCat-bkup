@@ -1,8 +1,6 @@
 import { useState } from "react";
 import { cx } from "../lib/utils";
 import { useI18n } from "../lib/i18n";
-import { message } from "./ui/message";
-import * as api from "../api";
 
 const PHRASES = { zh: "我同意并确认", en: "I agree and confirm" } as const;
 
@@ -30,104 +28,106 @@ function Item({ index, children }: { index: number; children: React.ReactNode })
   );
 }
 
-// 中文条款（新增：仅限高通模块检测/测试卡、禁止 MCC 460、仅限美国硬件企业开发商）。
+// 中文条款（与 README.md 的许可 / 使用 / 免责条款对齐）。
 function ZhItems() {
   return (
     <>
       <Item index={1}>
-        本软件（vocat）属于个人开发者业余时间开发的工具软件，支持高通模块调试，仅供技术研究、学习交流及企业内部测试使用。
-        <strong className="text-indigo-600 dark:text-indigo-400">严禁用于任何形式的商业出售或转售</strong>
-        ，严禁作为生产环境的基础设施。
+        本软件（vocat）为 source-available（源码可见）软件，依据 Vocat Research & Evaluation License 分发，
+        <strong className="text-indigo-600 dark:text-indigo-400">并非 OSI 认证的开源许可</strong>
+        。仅授权用于研究、教育、开发及高通蜂窝模组硬件功能验证；获取源码并不自动授予商用、再发布不受限修改版本或移除防滥用控制的权利。
       </Item>
-      <Item index={2}>本项目仅用于高通模块功能正常检测使用，仅限接入测试类卡片使用。</Item>
+      <Item index={2}>
+        本项目用于对自研 / 定制高通模组（首发 Quectel EC20）进行功能验证与故障诊断。仅应使用测试卡、开发卡、实验室卡、授权 eSIM profile，或本人拥有 / 被明确授权测试的 SIM/eSIM 资源；
+        <strong className="text-indigo-600 dark:text-indigo-400">不得使用属于他人的生产用订户凭证</strong>。
+      </Item>
       <Item index={3}>
-        <strong className="text-red-500 dark:text-red-400">禁止 MCC 460 卡片进行测试。</strong>
+        对 MCC 460 / 461（中国大陆）SIM 卡，系统将<strong className="text-red-500 dark:text-red-400">自动强制飞行模式并写入卡策略</strong>
+        ；向 +86 号段发送短信会被服务端拦截。上述为代码层强制控制，严禁移除、绕过、禁用、伪装或破坏。
       </Item>
       <Item index={4}>
-        本软件面向使用配套设备进行高通模块调试的企业开发者提供。允许企业使用本软件对其设备进行调试，但
-        <strong className="text-red-500 dark:text-red-400">严禁商业出售或转售</strong>
-        ；如发现在此范围外的违规使用，
-        <strong className="text-red-500 dark:text-red-400">我们将会自动锁定软件以及拉黑您的卡片 EID</strong>。
+        <strong className="text-red-500 dark:text-red-400">禁止用途：</strong>
+        未授权接入电信网络、冒用他人订户或设备、SIM 克隆、未授权 eSIM 开通、使用被盗 / 泄露凭证、电信欺诈、大规模群发短信、绕过运营商鉴权或合法限制、未授权拦截 / 监听、干扰移动网络基础设施，以及商业电信服务。
       </Item>
       <Item index={5}>
-        使用者承诺将严格遵守所在国家或地区的相关法律法规。
+        未经书面授权不得商用。修改或再发布版本
         <strong className="text-red-500 dark:text-red-400">
-          严禁将本软件用于电信诈骗、垃圾短信发送、非法网络代理、渗透测试等任何非法或违规场景
+          不得以移除或绕过地域限制、SIM / MCC 限制、设备数量限制、鉴权机制、完整性校验或防滥用控制为主要目的
         </strong>
-        。
+        ，并须保留版权、许可与署名声明。
       </Item>
       <Item index={6}>
-        本软件涉及底层 Modem 通信操作，可能包含未知的缺陷。对于因使用本软件引发的硬件损坏、通信资费异常、隐私泄露等直接或间接损失，
-        <strong>由使用者自行承担所有责任</strong>。
+        软件按 “AS IS” 提供，不附带任何明示或暗示的担保。作者、维护者、贡献者与分发者不对使用或滥用造成的损失负责，包括 SIM 卡损坏、eSIM profile 丢失、SIM 停用、modem / 基带故障、PCB / 模组 / 宿主设备损坏、网络服务中断、运营商 / 账户限制、数据丢失、监管后果及未授权的电信活动；
+        <strong>使用者有责任确保其使用符合适用法律、运营商政策与合同义务</strong>。
       </Item>
       <Item index={7}>
-        一旦点击继续即表示无条件接受本协议。如果您拒绝，本软件将立即触发自毁与环境清理机制以确保设备安全。
+        点击继续即表示你承诺：你的使用是授权的，并符合适用许可、法律、电信法规、运营商政策与测试要求。若拒绝，本软件将被卸载并清理运行环境。
       </Item>
     </>
   );
 }
 
-// English clauses (mirror of the Chinese items).
+// English clauses (mirror of the Chinese items, aligned with README.md).
 function EnItems() {
   return (
     <>
       <Item index={1}>
-        This software (vocat) is a utility built by an independent developer in their spare time. It supports Qualcomm
-        module debugging and is provided only for technical research, learning, and enterprise internal testing.{" "}
+        This software (vocat) is source-available software distributed under the Vocat Research &amp; Evaluation License
+        and{" "}
         <strong className="text-indigo-600 dark:text-indigo-400">
-          It is strictly prohibited to sell or resell it commercially in any form
-        </strong>{" "}
-        or to use it as production infrastructure.
+          is not an OSI-approved open-source license
+        </strong>
+        . It is authorized only for research, education, development, and hardware function verification of Qualcomm
+        cellular modules; access to source code does not automatically grant the right to commercial use, redistribute
+        unrestricted modified versions, or remove anti-abuse controls.
       </Item>
       <Item index={2}>
-        This project is intended solely for verifying the proper functioning of Qualcomm modules; only test-class
-        SIM cards may be connected.
+        This project is for function verification and fault diagnosis of custom Qualcomm modules (primarily Quectel
+        EC20). Only test, development, or lab SIM cards, authorized eSIM profiles, or SIM/eSIM resources you own or are
+        explicitly authorized to test may be used;{" "}
+        <strong className="text-indigo-600 dark:text-indigo-400">
+          production subscriber credentials belonging to others must not be used
+        </strong>
+        .
       </Item>
       <Item index={3}>
+        For MCC 460 / 461 (Chinese mainland) SIM cards, the system will{" "}
         <strong className="text-red-500 dark:text-red-400">
-          Testing with MCC 460 (China) SIM cards is strictly prohibited.
+          automatically force airplane mode and write a card policy
         </strong>
+        ; SMS to +86 numbers is blocked by the server. These are code-enforced controls and must not be removed,
+        bypassed, disabled, disguised, or tampered with.
       </Item>
       <Item index={4}>
-        This software is provided to enterprise developers who use supporting equipment to debug Qualcomm modules.
-        Enterprises may use this software to debug their own equipment, but{" "}
-        <strong className="text-red-500 dark:text-red-400">
-          commercial sale or resale is strictly prohibited
-        </strong>
-        ; if misuse outside this scope is detected,{" "}
-        <strong className="text-red-500 dark:text-red-400">
-          the software will be automatically locked and your card&apos;s EID will be blacklisted
-        </strong>
-        .
+        <strong className="text-red-500 dark:text-red-400">Prohibited uses:</strong>{" "}
+        unauthorized network access, impersonating another subscriber or device, SIM cloning, unauthorized eSIM
+        provisioning, use of stolen or leaked credentials, telecom fraud, mass SMS sending, bypassing operator
+        authentication or lawful restrictions, unauthorized interception, disrupting mobile network infrastructure,
+        and commercial telecom services.
       </Item>
       <Item index={5}>
-        The user undertakes to strictly comply with the laws and regulations of their country or region.{" "}
+        Commercial use is not permitted without written authorization. Modified or redistributed versions{" "}
         <strong className="text-red-500 dark:text-red-400">
-          It is strictly prohibited to use this software for telecom fraud, spam messaging, illegal network
-          proxying, penetration testing, or any other illegal or non-compliant scenario
+          must not have removing or bypassing regional, SIM, MCC, device-count, authentication, integrity, or
+          anti-abuse controls as their primary purpose
         </strong>
-        .
+        , and must retain copyright, license, and attribution notices.
       </Item>
       <Item index={6}>
-        This software involves low-level modem communication and may contain unknown defects.{" "}
-        <strong>The user bears all responsibility</strong> for any direct or indirect losses arising from its use,
-        including hardware damage, abnormal carrier charges, or privacy leakage.
+        The software is provided &ldquo;AS IS&rdquo; without any express or implied warranty. The authors, maintainers,
+        contributors, and distributors are not liable for losses from use or misuse, including SIM damage, eSIM profile
+        loss, SIM deactivation, modem/baseband failure, PCB/module/host device damage, network service interruption,
+        operator/account restrictions, data loss, regulatory consequences, and unauthorized telecom activity;{" "}
+        <strong>the user is responsible for ensuring their use complies with applicable laws, operator policies, and contractual obligations</strong>.
       </Item>
       <Item index={7}>
-        Clicking continue constitutes unconditional acceptance of this agreement. If you decline, the software
-        will immediately trigger its self-destruct and environment cleanup mechanism to keep the device safe.
+        Clicking continue signifies that you agree to ensure your use is authorized and complies with the applicable
+        license, laws, telecom regulations, operator policies, and testing requirements. If you decline, the software
+        will be uninstalled and its environment cleaned up.
       </Item>
     </>
   );
 }
-
-const OVERLAY_STYLE =
-  "display:flex;height:100vh;background:#0a0a0a;align-items:center;justify-content:center;" +
-  "font-size:24px;color:#ef4444;font-weight:bold;font-family:sans-serif;flex-direction:column;gap:16px;";
-const OVERLAY_ICON =
-  '<svg style="width:64px;height:64px;" fill="none" viewBox="0 0 24 24" stroke="currentColor">' +
-  '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" ' +
-  'd="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>';
 
 // Disclaimer / EULA overlay shown after login (first run requires typing the
 // phrase; subsequent periodic confirmations only require a click).
@@ -145,14 +145,7 @@ export function Disclaimer({
   const canAgree = !firstTime || typed === phrase;
 
   function reject() {
-    message.warning(zh ? t("正在退出并清理软件...") : "Exiting and cleaning up...");
-    api
-      .api("/system/uninstall", { method: "POST" })
-      .catch(() => {})
-      .finally(() => {
-        const text = zh ? t("软件已被卸载 / 服务已终止") : "Software uninstalled / service stopped";
-        document.body.innerHTML = `<div style="${OVERLAY_STYLE}"><div>${OVERLAY_ICON}</div><div>${text}</div></div>`;
-      });
+    window.close();
   }
 
   return (
@@ -202,7 +195,7 @@ export function Disclaimer({
                 onClick={reject}
                 className="flex-1 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm font-bold tracking-wide text-gray-500 transition-all duration-300 hover:border-red-200 hover:bg-red-50 hover:text-red-600 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:border-red-900/50 dark:hover:bg-red-900/20 dark:hover:text-red-400"
               >
-                {zh ? t("拒绝并卸载") : "Decline & Uninstall"}
+                {zh ? t("拒绝&退出程序") : "Decline & Exit"}
               </button>
               <button
                 type="button"

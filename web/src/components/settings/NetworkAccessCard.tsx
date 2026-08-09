@@ -3,12 +3,10 @@ import {
   CheckmarkRegular,
   DeleteRegular,
   GlobeRegular,
-  ShieldCheckmarkRegular,
   WarningRegular,
 } from "@fluentui/react-icons";
 import type { SecuritySettings } from "../../types";
 import { useI18n } from "../../lib/i18n";
-import { cx } from "../../lib/utils";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { Switch } from "../ui/Switch";
@@ -148,24 +146,15 @@ export function NetworkAccessCard({
             />
           </div>
 
-          <div
-            className={cx(
-              "flex items-center gap-2 rounded-lg border p-3 text-xs",
-              clientAllowed
-                ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200"
-                : "border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300",
-            )}
-          >
-            {clientAllowed ? (
-              <ShieldCheckmarkRegular className="shrink-0" />
-            ) : (
+          {!clientAllowed && (
+            <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300">
               <WarningRegular className="shrink-0" />
-            )}
-            <span className="font-mono">{clientIp || "--"}</span>
-            <span className="font-semibold">
-              {clientAllowed ? t("当前连接允许访问") : t("当前连接将被拒绝，保存后可能无法继续访问")}
-            </span>
-          </div>
+              <span className="font-mono">{clientIp || "--"}</span>
+              <span className="font-semibold">
+                {t("当前连接将被拒绝，保存后可能无法继续访问")}
+              </span>
+            </div>
+          )}
         </div>
       )}
     </div>

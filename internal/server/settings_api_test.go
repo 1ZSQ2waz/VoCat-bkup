@@ -156,6 +156,21 @@ func TestNotificationSettingsRejectsUnknownAndMalformedInput(t *testing.T) {
 			code: "invalid_notification_config",
 		},
 		{
+			name: "invalid Telegram chat id",
+			body: `{"telegram":{"enabled":true,"chat_id":"group-name"}}`,
+			code: "invalid_notification_config",
+		},
+		{
+			name: "invalid Telegram admin id",
+			body: `{"telegram":{"enabled":true,"admin_id":"-1"}}`,
+			code: "invalid_notification_config",
+		},
+		{
+			name: "insecure Telegram base URL",
+			body: `{"telegram":{"enabled":true,"base_url":"http://example.com"}}`,
+			code: "invalid_notification_config",
+		},
+		{
 			name: "unknown field",
 			body: `{"email":{"enabled":false,"smtp_host":"mail.example.com","typo":1}}`,
 			code: "invalid_notification_config",

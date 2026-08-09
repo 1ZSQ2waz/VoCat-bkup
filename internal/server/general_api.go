@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"vocat/internal/auth"
+	"vocat/internal/buildinfo"
 	"vocat/internal/i18n"
 	"vocat/internal/loghub"
 	"vocat/internal/store"
@@ -302,8 +303,8 @@ func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
-			"version":      "0.1.0-dev",
-			"build_time":   "",
+			"version":      buildinfo.Version,
+			"build_time":   buildinfo.BuildTime,
 			"config":       "VOCAT_CONFIG and environment",
 			"os":           runtime.GOOS,
 			"architecture": runtime.GOARCH,
@@ -319,7 +320,7 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
 			"available": false,
-			"version":   "0.1.0-dev",
+			"version":   buildinfo.Version,
 			"message":   i18n.T("未配置受信任的软件更新源；不会从未知地址下载或执行文件。"),
 		},
 	})

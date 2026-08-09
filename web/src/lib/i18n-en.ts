@@ -70,8 +70,8 @@ export const EN_DICT: Record<string, string> = {
   "请输入用户名和密码": "Please enter your username and password",
   欢迎回来: "Welcome back",
   "登录失败，请检查凭证": "Sign-in failed. Check your credentials.",
-  "EC20 出厂专业检测工具": "EC20 Factory Professional Test Tool",
-  "EC20 出厂检测工具": "EC20 Factory Test Tool",
+  "高通模块专业测试工具": "Qualcomm Module Professional Test Tool",
+  "高通模块测试工具": "Qualcomm Module Test Tool",
   用户名: "Username",
   密码: "Password",
   登录: "Sign In",
@@ -162,7 +162,6 @@ export const EN_DICT: Record<string, string> = {
   信任代理请求头: "Trust Proxy Headers",
   "仅在系统位于可信反向代理之后时开启，按 X-Forwarded-For 判定来源；否则客户端可伪造该头绕过内网限制。":
     "Enable only behind a trusted reverse proxy; the source is then determined by X-Forwarded-For. Otherwise clients can spoof that header to bypass the internal restriction.",
-  当前连接允许访问: "Current connection is allowed",
   "当前连接将被拒绝，保存后可能无法继续访问": "Current connection will be denied; you may lose access after saving",
   访问策略加载失败: "Failed to load access policy",
   访问策略已保存: "Access policy saved",
@@ -172,8 +171,16 @@ export const EN_DICT: Record<string, string> = {
 
   // ---- 设置页：Bot 渠道（Telegram/Pushplus） ----
   "启用 Telegram 机器人": "Enable Telegram Bot",
+  "启用后会推送新短信，并允许指定管理员通过 Bot 查看状态、切卡、管理 WiFi Calling、发送短信和限时拨号。拨号只执行呼叫并自动挂断，不处理音频。":
+    "When enabled, new SMS messages are pushed and the designated administrator can check status, switch profiles, manage WiFi Calling, send SMS, and place timed calls. Calls only dial and hang up automatically; audio is not processed.",
   "启用 Pushplus 推送": "Enable Pushplus",
+  "该渠道只推送新收到的短信，不提供设备控制功能。每条短信都会单独推送，不按内容合并。":
+    "This channel only pushes newly received SMS messages and provides no device controls. Every SMS is pushed separately and is not merged by content.",
   "例如 123456": "e.g. 123456",
+  "接收短信通知和命令回复的私聊或群组 ID。群组 ID 可以是负数。":
+    "Private chat or group ID that receives SMS notifications and command replies. Group IDs may be negative.",
+  "只有该 Telegram 用户可以执行控制命令；留空时仅推送通知，不接受命令。":
+    "Only this Telegram user may run control commands. Leave blank for notifications only.",
   "TG API 反代（可选）": "TG API Reverse Proxy (optional)",
   "HTTP 代理（可选）": "HTTP Proxy (optional)",
   "反向代理地址 (例如 https://api.telegram.org/bot%s/%s)":
@@ -543,7 +550,7 @@ export const EN_DICT: Record<string, string> = {
   "扫描超时或模组忙，请稍后重试": "Scan timed out or the modem is busy; please retry later",
   "正在请求模组扫描可用网络...": "Requesting a network scan from the modem...",
   "运营商扫描需要开启蜂窝射频；请先关闭飞行模式，再手动开始扫描。": "Carrier scanning requires the cellular radio. Turn off airplane mode, then start the scan manually.",
-  "拒绝并卸载": "Decline & Uninstall",
+  "拒绝&退出程序": "Decline & Exit",
   "指令下发失败": "Failed to issue the command",
   "排序": "Sort",
   "排序：信号": "Sort: Signal",
@@ -589,7 +596,6 @@ export const EN_DICT: Record<string, string> = {
   "正在搜索周围网络，这可能需要 1-3 分钟...": "Scanning for nearby networks; this may take 1-3 minutes...",
   "正在注册到 {plmn}，请稍候（可能需要 1-2 分钟）...": "Registering to {plmn}; please wait (this may take 1-2 minutes)...",
   "正在连接...": "Connecting...",
-  "正在退出并清理软件...": "Exiting and cleaning up...",
   "此SIM卡可能不支持 eUICC 功能": "This SIM card may not support eUICC",
   "此类 WWAN QMI 设备运行后端固定为 QMI；AT 口仍会保留给 AT 终端。": "This WWAN QMI device is fixed to the QMI backend; the AT port remains available for the AT terminal.",
   "此类设备固定 MBIM，AT 口仅用于终端": "This device is fixed to MBIM; the AT port is for the terminal only",
@@ -657,7 +663,6 @@ export const EN_DICT: Record<string, string> = {
   "超时(ms)": "Timeout (ms)",
   "轮换失败": "Rotation failed",
   "轮换请求已发送": "Rotation request sent",
-  "软件已被卸载 / 服务已终止": "Software uninstalled / service stopped",
   "输入新名称": "Enter a new name",
   "输入菜单选项数字": "Enter the menu option number",
   "运营商扫描完成": "Carrier scan completed",

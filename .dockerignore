@@ -1,0 +1,36 @@
+# Exclude everything not needed for the multi-stage build to keep context small.
+.git
+.gitignore
+.github
+.vscode
+.idea
+.claude
+build/
+data/
+**/node_modules/
+web/dist/
+web/build/
+**/__pycache__/
+*.pyc
+*.pyo
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+.DS_Store
+Thumbs.db
+Dockerfile
+.dockerignore
+
+# Documentation is fine in build context but not strictly required; keep README
+# available for reference and exclude everything else markdown.
+*.md
+!README.md
+
+# Local-only scripts and scratch output.
+build/lists/
+*.cookies
+*.session
+vc.jar

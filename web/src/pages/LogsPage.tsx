@@ -207,26 +207,26 @@ export default function LogsPage() {
         title={t("实时日志")}
         subtitle={t("查看系统运行日志，支持过滤和搜索")}
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               onClick={togglePause}
               variant={paused ? "success" : "warning"}
-              className="!border-0"
+              className="!border-0 flex-1 justify-center sm:flex-none"
               icon={paused ? <PlayRegular /> : <PauseRegular />}
             >
               {paused ? t("继续") : t("暂停")}
             </Button>
-            <Button onClick={clearLogs} className="!border-0" icon={<DeleteRegular />}>
+            <Button onClick={clearLogs} className="!border-0 flex-1 justify-center sm:flex-none" icon={<DeleteRegular />}>
               {t("清空")}
             </Button>
-            <Button onClick={exportLogs} variant="primary" className="!border-0" icon={<ArrowDownloadRegular />}>
+            <Button onClick={exportLogs} variant="primary" className="!border-0 flex-1 justify-center sm:flex-none" icon={<ArrowDownloadRegular />}>
               {t("导出")}
             </Button>
           </div>
         }
       />
 
-      <div className="flex items-center gap-4 mb-4">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mb-4">
         <div className="flex items-center gap-2">
           <span
             className={cx("w-2 h-2 rounded-full", connected ? "bg-green-500 animate-pulse" : "bg-red-500")}
@@ -239,7 +239,7 @@ export default function LogsPage() {
             {connError}
           </span>
         ) : null}
-        <div className="flex-1" />
+        <div className="hidden sm:block flex-1" />
         <label className="flex items-center gap-2">
           <Switch checked={autoTail} onChange={setAutoTail} ariaLabel={t("自动追尾")} />
           <span className="text-sm text-gray-500 dark:text-gray-400">{t("自动追尾")}</span>
@@ -247,19 +247,19 @@ export default function LogsPage() {
       </div>
 
       <div className="ui-card p-4 mb-4">
-        <div className="flex flex-wrap items-center gap-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
           <Select
             value={level}
             onChange={(v) => setLevel(v as Level)}
             placeholder={t("日志级别")}
-            className="w-32"
+            className="w-full sm:w-40"
             options={LEVEL_OPTIONS.map((o) => ({ ...o, label: t(o.label) }))}
           />
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder={t("搜索日志内容...")}
-            className="w-64"
+            className="w-full sm:w-64"
             suffix={
               search ? (
                 <button
@@ -273,7 +273,7 @@ export default function LogsPage() {
               ) : undefined
             }
           />
-          <span className="text-sm text-gray-400">
+          <span className="text-sm text-gray-400 sm:ml-auto">
             {t("显示")} {filtered.length} / {logs.length} {t("条")}
           </span>
         </div>
@@ -284,7 +284,7 @@ export default function LogsPage() {
       <div className="ui-card overflow-hidden">
         <div
           ref={logContainerRef}
-          className="h-[60vh] overflow-auto font-mono text-sm bg-gray-900 dark:bg-black text-gray-100 p-4"
+          className="h-[60vh] min-h-[280px] overflow-auto font-mono text-sm bg-gray-900 dark:bg-black text-gray-100 p-4"
         >
           {filtered.length === 0 ? (
             <div className="text-gray-500 text-center py-8">

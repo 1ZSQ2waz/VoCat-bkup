@@ -20,6 +20,7 @@ import { Drawer } from "../ui/Drawer";
 import { ErrorBoundary } from "../ui/ErrorBoundary";
 import { cx } from "../../lib/utils";
 import { BrandLogo } from "./BrandLogo";
+import { VersionBadge } from "./VersionBadge";
 
 const NAV = [
   { to: "/", label: "仪表盘", icon: BoardRegular, end: true },
@@ -138,7 +139,7 @@ export function AuthenticatedShell({
             {!collapsed && (
               <div className="ml-3">
                 <div className="sidebar-brand-title">vocat</div>
-                <div className="text-[10px] font-medium leading-tight tracking-wide text-gray-400 dark:text-gray-500">{t("EC20 出厂检测工具")}</div>
+                <div className="text-[10px] font-medium leading-tight tracking-wide text-gray-400 dark:text-gray-500">{t("高通模块测试工具")}</div>
               </div>
             )}
           </div>
@@ -153,7 +154,7 @@ export function AuthenticatedShell({
             <BrandLogo className="sidebar-brand-logo" />
             <div className="ml-3">
               <div className="sidebar-brand-title">vocat</div>
-              <div className="text-[10px] font-medium leading-tight tracking-wide text-gray-400 dark:text-gray-500">{t("EC20 出厂检测工具")}</div>
+              <div className="text-[10px] font-medium leading-tight tracking-wide text-gray-400 dark:text-gray-500">{t("高通模块测试工具")}</div>
             </div>
           </div>
           {menuList(false)}
@@ -178,6 +179,7 @@ export function AuthenticatedShell({
             </button>
           </div>
           <div className="flex items-center gap-3">
+            <VersionBadge />
             <LanguageSwitch />
             <SwitchDark isDark={isDark} onToggle={onToggleTheme} />
           </div>
