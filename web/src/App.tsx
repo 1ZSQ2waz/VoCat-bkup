@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactElement } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { AuthProvider, useAuth } from "./store/auth";
-import { LanguageProvider, useI18n } from "./lib/i18n";
+import { LanguageProvider } from "./lib/i18n";
 import { AuthenticatedShell } from "./components/shell/AuthenticatedShell";
 import { UnauthenticatedShell } from "./components/shell/UnauthenticatedShell";
 import { Disclaimer } from "./components/Disclaimer";
@@ -40,10 +40,9 @@ function useTheme() {
 }
 
 function RequireAuth({ children }: { children: ReactElement }) {
-  const { t } = useI18n();
   const { ready, isAuthenticated } = useAuth();
   const location = useLocation();
-  if (!ready) return <LoadingScreen title={t("正在加载…")} subtitle={t("正在准备页面组件与资源")} />;
+  if (!ready) return <LoadingScreen />;
   if (!isAuthenticated) {
     return <Navigate to={`/login?redirect=${encodeURIComponent(location.pathname)}`} replace />;
   }
@@ -58,7 +57,7 @@ function LoginLayout({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme
 
 function AppRoot() {
   const { isDark, toggle } = useTheme();
-  const { isAuthenticated } = useAuth();
+  const { ready, isAuthenticated } = useAuth();
   const [showDisclaimer, setShowDisclaimer] = useState(false);
   const [firstTime, setFirstTime] = useState(true);
 
@@ -89,6 +88,8 @@ function AppRoot() {
     }
     setShowDisclaimer(false);
   }
+
+  if (!ready) return <LoadingScreen />;
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-gray-50 font-sans text-gray-900 transition-colors duration-300 selection:bg-indigo-500 selection:text-white dark:bg-[#101014] dark:text-gray-100">
