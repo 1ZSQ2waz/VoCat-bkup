@@ -2,7 +2,7 @@
   <img src="web/public/favicon.svg" width="96" alt="Vocat">
 </p>
 
-<h1 align="center">Vocat</h1>
+<h1 align="center">VoCat</h1>
 
 <p align="center">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.25-00ADD8?style=flat-square&logo=go&logoColor=white">
