@@ -240,18 +240,6 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-The local `release.py` helper is intentionally excluded from Git. It can build the same four binary targets locally and push the release tag:
-
-```bash
-python release.py 0.2.0
-```
-
-Local build without publishing:
-
-```bash
-python release.py 0.2.0 --build-only
-```
-
 ## Project layout
 
 ```text
