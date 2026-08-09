@@ -27,8 +27,8 @@ Vocat is an open-source web control panel and engineering toolkit for Quectel EC
 The backend is written in Go, the interface is built with React and TypeScript, and the production frontend is embedded into the Go binary. A single executable contains the web application and uses SQLite for persistent state.
 
 <p align="center">
-  <img src="img\image.png" width="420">
-  <img src="img\image-1.png" width="420">
+  <img src="img\image.png">
+  <img src="img\image-1.png">
 </p>
 
 ## Features
