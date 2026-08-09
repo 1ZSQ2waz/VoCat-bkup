@@ -64,14 +64,14 @@ Available features depend on the module firmware, USB composition, SIM/eSIM capa
 ### One-click Linux installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/main/scripts/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh | sudo bash
 ```
 
 Install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/main/scripts/install.sh -o install.sh
-sudo bash install.sh 0.2.0
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh -o install.sh
+sudo bash install.sh 0.0.2
 ```
 
 The installer:
@@ -80,7 +80,7 @@ The installer:
 - downloads the matching GitHub Release binary;
 - verifies it against `SHA256SUMS`;
 - installs Vocat under `/opt/vocat`;
-- creates a dedicated system user and systemd service;
+- creates a hardened systemd service with the hardware and network access required by Vocat;
 - stores runtime configuration in `/etc/vocat/env`;
 - generates a random initial administrator password on first installation.
 
@@ -107,8 +107,14 @@ Verify and install it:
 sha256sum -c SHA256SUMS --ignore-missing
 sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data
 sudo install -m 0755 vocat-linux-amd64 /opt/vocat/bin/vocat
-sudo /opt/vocat/bin/vocat
+sudo env \
+  VOCAT_DATABASE_PATH=/opt/vocat/data/vocat.db \
+  VOCAT_ADMIN_PASSWORD=change-this-password \
+  /opt/vocat/bin/vocat
 ```
+
+This manual command runs Vocat in the foreground. Use the one-click installer
+when a managed systemd service and automatic restart are required.
 
 ### Docker
 

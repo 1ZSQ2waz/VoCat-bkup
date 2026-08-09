@@ -27,10 +27,10 @@ REPO="${VOCAT_REPO:-MengMengCode/VoCat}"
 
 INSTALL_DIR="/opt/vocat/bin"
 BINARY_PATH="${INSTALL_DIR}/vocat"
+LINK_PATH="/usr/local/bin/vocat"
 ENV_DIR="/etc/vocat"
 ENV_FILE="${ENV_DIR}/env"
 UNIT_PATH="/etc/systemd/system/vocat.service"
-VOCAT_USER="vocat"
 
 # --- Language ----------------------------------------------------------------
 LANG_CHOICE=""
@@ -45,10 +45,20 @@ msg() {
 }
 
 prompt_language() {
+    if ! ( : </dev/tty ) 2>/dev/null; then
+        case "${VOCAT_LANG:-en}" in
+            zh|zh-CN|cn) LANG_CHOICE="zh" ;;
+            *) LANG_CHOICE="en" ;;
+        esac
+        return
+    fi
     while true; do
-        echo "选择语言 / Select language:  1) 中文   2) English"
-        printf '> '
-        read -r choice
+        echo "选择语言 / Select language:  1) 中文   2) English" >/dev/tty
+        printf '> ' >/dev/tty
+        if ! read -r choice </dev/tty; then
+            LANG_CHOICE="en"
+            return
+        fi
         case "$choice" in
             1|"") LANG_CHOICE="zh"; return ;;
             2) LANG_CHOICE="en"; return ;;
@@ -108,6 +118,8 @@ skip_if_equal() {
     installed=$("$BINARY_PATH" version 2>/dev/null | awk '{print $2}' | sed -E 's/[[:space:]]*\(.*$//') || return 0
     [ -z "$installed" ] && return 0
     if [ "$installed" = "$TARGET_VERSION" ]; then
+        install -d -m 0755 "$(dirname "$LINK_PATH")"
+        ln -sfn "$BINARY_PATH" "$LINK_PATH"
         msg "已安装版本 $installed，与目标版本相同，跳过更新。" "Installed version $installed equals target; skipping."
         exit 0
     fi
@@ -147,21 +159,19 @@ download_and_verify() {
 # --- Install binary ----------------------------------------------------------
 install_binary() {
     install -d -m 0755 "$INSTALL_DIR"
-    install -m 0755 "${VOCAT_TMP}/vocat" "$BINARY_PATH"
-}
-
-# --- System user (idempotent) ------------------------------------------------
-ensure_user() {
-    if id "$VOCAT_USER" >/dev/null 2>&1; then
-        return
+    install -m 0755 "${VOCAT_TMP}/vocat" "${BINARY_PATH}.new"
+    if [ -e "$BINARY_PATH" ]; then
+        cp -a "$BINARY_PATH" "${BINARY_PATH}.bak"
     fi
-    useradd --system --no-create-home --shell /usr/sbin/nologin "$VOCAT_USER"
+    mv -f "${BINARY_PATH}.new" "$BINARY_PATH"
+    install -d -m 0755 "$(dirname "$LINK_PATH")"
+    ln -sfn "$BINARY_PATH" "$LINK_PATH"
 }
 
 # --- Data directory ----------------------------------------------------------
 ensure_data_dir() {
     install -d -m 0755 /opt/vocat/data
-    chown -R "$VOCAT_USER":"$VOCAT_USER" /opt/vocat || true
+    chown -R root:root /opt/vocat
 }
 
 # --- Env file (first install only) -------------------------------------------
@@ -174,7 +184,7 @@ setup_env() {
     fi
     install -d -m 0755 "$ENV_DIR"
     local secret
-    secret=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
+    secret=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     [ -n "$secret" ] || die "生成随机密钥失败。" "Failed to generate a random secret."
     printf 'VOCAT_ADMIN_PASSWORD=%s\n' "$secret" > "$ENV_FILE"
     chmod 0600 "$ENV_FILE"
@@ -185,15 +195,42 @@ setup_env() {
 write_unit() {
     cat > "$UNIT_PATH" <<EOF
 [Unit]
-Description=vocat
-After=network.target
+Description=vocat cellular and VoWiFi control service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-User=${VOCAT_USER}
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/vocat
 EnvironmentFile=${ENV_FILE}
+Environment=VOCAT_ADDR=0.0.0.0:7575
 Environment=VOCAT_DATABASE_PATH=/opt/vocat/data/vocat.db
 ExecStart=${BINARY_PATH}
 Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=30s
+TimeoutStopSec=20s
+
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=false
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ReadWritePaths=/opt/vocat/data
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
@@ -203,7 +240,16 @@ EOF
 
 enable_and_start() {
     systemctl daemon-reload
-    systemctl enable --now vocat
+    systemctl enable vocat
+    if systemctl restart vocat; then
+        return
+    fi
+    if [ -e "${BINARY_PATH}.bak" ]; then
+        msg "新版本启动失败，正在恢复旧二进制。" "The new version failed to start; restoring the previous binary."
+        cp -a "${BINARY_PATH}.bak" "$BINARY_PATH"
+        systemctl restart vocat || true
+    fi
+    die "vocat 服务启动失败。" "The vocat service failed to start."
 }
 
 # --- Main --------------------------------------------------------------------
@@ -212,7 +258,6 @@ detect_arch
 skip_if_equal
 download_and_verify
 install_binary
-ensure_user
 ensure_data_dir
 setup_env
 write_unit
