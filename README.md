@@ -112,21 +112,38 @@ sudo /opt/vocat/bin/vocat
 
 ### Docker
 
+For a Linux host that must discover every attached supported Quectel modem and
+continue seeing USB hot-plug events, run Vocat in hardware-access mode:
+
 ```bash
 docker pull ghcr.io/mengmengcode/vocat:latest
 
 docker run -d \
   --name vocat \
   --restart unless-stopped \
-  -p 7575:7575 \
+  --network host \
+  --privileged \
+  --user 0:0 \
   -e VOCAT_ADMIN_PASSWORD=change-this-password \
   -v vocat-data:/opt/vocat/data \
-  --device /dev/ttyUSB2:/dev/ttyUSB2 \
-  --device /dev/cdc-wdm0:/dev/cdc-wdm0 \
+  -v /dev:/dev \
+  -v /sys:/sys:ro \
   ghcr.io/mengmengcode/vocat:latest
 ```
 
-Adjust device mappings for the modem interfaces available on the host. Additional network capabilities or host networking may be required for QMI and WiFi Calling experiments.
+Open `http://<server-address>:7575` after the container starts. Host networking
+is required so QMI network interfaces remain visible to Vocat, while privileged
+device access is required for serial ports, QMI control nodes, TUN interfaces,
+network configuration, and devices added after the container starts. The
+`/dev` bind mount makes new `ttyUSB*`, `ttyACM*`, and `cdc-wdm*` nodes visible
+without recreating the container.
+
+This mode intentionally gives Vocat broad access to the host's devices and
+network stack. Use it only on a trusted Linux host. The automatic discovery
+currently identifies supported Quectel USB modems (USB vendor ID `2c7c`), not
+arbitrary modem brands. Mapping only individual nodes with `--device`, such as
+`/dev/ttyUSB2` and `/dev/cdc-wdm0`, limits the container to those fixed nodes
+and does not provide complete multi-device or hot-plug discovery.
 
 The GHCR image is published for `linux/amd64` and `linux/arm64`.
 

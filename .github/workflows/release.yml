@@ -35,6 +35,7 @@ jobs:
           retention-days: 1
 
   test:
+    needs: web
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -44,6 +45,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Download embedded web UI
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
       - name: Test
         run: go test ./...
 
