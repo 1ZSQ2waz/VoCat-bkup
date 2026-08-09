@@ -87,6 +87,13 @@ func (relay *sessionRelay) run() {
 		packet := append([]byte(nil), buffer[:n]...)
 		if isIKE {
 			if err := relay.handleIKE(packet); err != nil {
+				if errors.Is(err, errMismatchedSessionSPIs) {
+					// A reconnect can reuse the same NAT mapping while the ePDG still
+					// has packets queued for the previous IKE SA. Those packets are
+					// unrelated to this authenticated session and must be discarded;
+					// treating one as fatal tears down the newly established CHILD_SA.
+					continue
+				}
 				relay.fail(err)
 				return
 			}
@@ -111,13 +118,15 @@ func (relay *sessionRelay) run() {
 	}
 }
 
+var errMismatchedSessionSPIs = errors.New("ike: session packet has mismatched SPIs")
+
 func (relay *sessionRelay) handleIKE(packet []byte) error {
 	header, _, err := parseIKEPacket(packet)
 	if err != nil {
 		return err
 	}
 	if header.InitiatorSPI != relay.spii || header.ResponderSPI != relay.spir {
-		return errors.New("ike: session packet has mismatched SPIs")
+		return errMismatchedSessionSPIs
 	}
 	if header.Flags&flagResponse != 0 {
 		return nil

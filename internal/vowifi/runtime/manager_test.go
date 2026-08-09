@@ -63,6 +63,31 @@ func (fakeTunnelSession) Evidence() vowifi.TunnelEvidence {
 }
 func (fakeTunnelSession) Close(context.Context) error { return nil }
 
+type flakyTunnelProvider struct {
+	mu       sync.Mutex
+	attempts int
+	failures int
+}
+
+func (provider *flakyTunnelProvider) Start(
+	context.Context,
+	vowifi.TunnelRequest,
+) (vowifi.TunnelSession, error) {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	provider.attempts++
+	if provider.attempts <= provider.failures {
+		return nil, errors.New("temporary tunnel failure")
+	}
+	return fakeTunnelSession{}, nil
+}
+
+func (provider *flakyTunnelProvider) Attempts() int {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	return provider.attempts
+}
+
 type fakeIMSProvider struct{}
 type fakeIMSSession struct{}
 
@@ -95,6 +120,27 @@ func testOrchestrator(t *testing.T, id string) *vowifi.Orchestrator {
 		Radio:  fakeRadio{},
 		Proxy:  fakeProxy{},
 		Tunnel: fakeTunnelProvider{},
+		IMS:    fakeIMSProvider{},
+		Phones: fakePhones{},
+	}, vowifi.Options{DeviceID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return orchestrator
+}
+
+func testOrchestratorWithTunnel(
+	t *testing.T,
+	id string,
+	tunnel vowifi.TunnelProvider,
+) *vowifi.Orchestrator {
+	t.Helper()
+	orchestrator, err := vowifi.New(vowifi.Dependencies{
+		SIM:    fakeSIM{},
+		AKA:    fakeAKA{},
+		Radio:  fakeRadio{},
+		Proxy:  fakeProxy{},
+		Tunnel: tunnel,
 		IMS:    fakeIMSProvider{},
 		Phones: fakePhones{},
 	}, vowifi.Options{DeviceID: id})
@@ -146,6 +192,79 @@ func TestManagerRunsAndPublishesEnable(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("enable did not finish")
+}
+
+func TestManagerRetriesEnabledPolicyUntilReady(t *testing.T) {
+	provider := &flakyTunnelProvider{failures: 2}
+	manager := New(Options{
+		OperationTimeout: time.Second,
+		RetryInitial:     5 * time.Millisecond,
+		RetryMaximum:     10 * time.Millisecond,
+	})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	if err := manager.Register(testOrchestratorWithTunnel(t, "ec20", provider)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.RequestEnabled("ec20", true); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		state, err := manager.State("ec20")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.Phase == vowifi.PhaseSMSReady {
+			if attempts := provider.Attempts(); attempts != 3 {
+				t.Fatalf("tunnel attempts = %d, want 3", attempts)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("VoWiFi did not become ready after retries; attempts=%d", provider.Attempts())
+}
+
+func TestManagerStopsAutomaticRetryWhenPolicyIsDisabled(t *testing.T) {
+	provider := &flakyTunnelProvider{failures: 100}
+	manager := New(Options{
+		OperationTimeout: time.Second,
+		RetryInitial:     100 * time.Millisecond,
+		RetryMaximum:     100 * time.Millisecond,
+	})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	if err := manager.Register(testOrchestratorWithTunnel(t, "ec20", provider)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.RequestEnabled("ec20", true); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		manager.mu.Lock()
+		pending := manager.entries["ec20"].autoRetryPending
+		manager.mu.Unlock()
+		if pending {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := manager.RequestEnabled("ec20", false); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if attempts := provider.Attempts(); attempts != 1 {
+		t.Fatalf("tunnel attempts after disable = %d, want 1", attempts)
+	}
+	state, err := manager.State("ec20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Enabled || state.Phase != vowifi.PhaseIdle {
+		t.Fatalf("state after disabling retry policy = %+v", state)
+	}
 }
 
 func TestManagerRejectsUnknownDevice(t *testing.T) {

@@ -20,7 +20,11 @@ var (
 	ErrClosed              = errors.New("vowifi runtime: manager is closed")
 )
 
-const defaultOperationTimeout = 2 * time.Minute
+const (
+	defaultOperationTimeout = 2 * time.Minute
+	defaultRetryInitial     = 2 * time.Second
+	defaultRetryMaximum     = 30 * time.Second
+)
 
 type StateHandler func(context.Context, vowifi.State) error
 type OrchestratorFactory func(context.Context, string) (*vowifi.Orchestrator, error)
@@ -28,6 +32,8 @@ type OrchestratorFactory func(context.Context, string) (*vowifi.Orchestrator, er
 type Options struct {
 	Logger           *slog.Logger
 	OperationTimeout time.Duration
+	RetryInitial     time.Duration
+	RetryMaximum     time.Duration
 	OnState          StateHandler
 	Factory          OrchestratorFactory
 }
@@ -37,6 +43,8 @@ type Manager struct {
 	cancel           context.CancelFunc
 	logger           *slog.Logger
 	operationTimeout time.Duration
+	retryInitial     time.Duration
+	retryMaximum     time.Duration
 	onState          StateHandler
 	factory          OrchestratorFactory
 
@@ -50,6 +58,11 @@ type entry struct {
 	orchestrator     *vowifi.Orchestrator
 	busy             bool
 	reconnectPending bool
+	disablePending   bool
+	desiredEnabled   bool
+	autoRetryPending bool
+	retryFailures    uint
+	operationCancel  context.CancelFunc
 	stopWatch        func()
 }
 
@@ -60,12 +73,23 @@ func New(options Options) *Manager {
 	if options.OperationTimeout <= 0 {
 		options.OperationTimeout = defaultOperationTimeout
 	}
+	if options.RetryInitial <= 0 {
+		options.RetryInitial = defaultRetryInitial
+	}
+	if options.RetryMaximum <= 0 {
+		options.RetryMaximum = defaultRetryMaximum
+	}
+	if options.RetryMaximum < options.RetryInitial {
+		options.RetryMaximum = options.RetryInitial
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
 		ctx:              ctx,
 		cancel:           cancel,
 		logger:           options.Logger,
 		operationTimeout: options.OperationTimeout,
+		retryInitial:     options.RetryInitial,
+		retryMaximum:     options.RetryMaximum,
 		onState:          options.OnState,
 		factory:          options.Factory,
 		entries:          make(map[string]*entry),
@@ -184,6 +208,20 @@ func (manager *Manager) RequestEnabled(deviceID string, enabled bool) (vowifi.St
 	if err := manager.Ensure(manager.ctx, deviceID); err != nil {
 		return vowifi.State{}, err
 	}
+	manager.mu.Lock()
+	item := manager.entries[deviceID]
+	item.desiredEnabled = enabled
+	if !enabled && item.busy {
+		item.disablePending = true
+		cancel := item.operationCancel
+		state := item.orchestrator.State()
+		manager.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return state, nil
+	}
+	manager.mu.Unlock()
 	return manager.startOperation(deviceID, false, func(ctx context.Context, orchestrator *vowifi.Orchestrator) error {
 		if enabled {
 			_, err := orchestrator.Enable(ctx)
@@ -198,6 +236,11 @@ func (manager *Manager) RequestReconnect(deviceID string) (vowifi.State, error) 
 	if err := manager.Ensure(manager.ctx, deviceID); err != nil {
 		return vowifi.State{}, err
 	}
+	manager.mu.Lock()
+	if item := manager.entries[deviceID]; item != nil {
+		item.desiredEnabled = true
+	}
+	manager.mu.Unlock()
 	return manager.startOperation(deviceID, true, func(ctx context.Context, orchestrator *vowifi.Orchestrator) error {
 		_, err := orchestrator.Reconnect(ctx)
 		return err
@@ -270,6 +313,17 @@ func (manager *Manager) runOperations(
 	defer manager.wg.Done()
 	for {
 		ctx, cancel := context.WithTimeout(manager.ctx, manager.operationTimeout)
+		manager.mu.Lock()
+		if item.disablePending {
+			item.disablePending = false
+			item.reconnectPending = false
+			operation = func(ctx context.Context, orchestrator *vowifi.Orchestrator) error {
+				_, err := orchestrator.Disable(ctx)
+				return err
+			}
+		}
+		item.operationCancel = cancel
+		manager.mu.Unlock()
 		err := operation(ctx, item.orchestrator)
 		cancel()
 		if err != nil &&
@@ -281,23 +335,114 @@ func (manager *Manager) runOperations(
 				"error", err,
 			)
 		}
+		state := item.orchestrator.State()
 		manager.mu.Lock()
-		if manager.closed || !item.reconnectPending {
+		item.operationCancel = nil
+		if manager.closed {
 			item.busy = false
 			manager.mu.Unlock()
 			return
 		}
-		item.reconnectPending = false
+		if item.disablePending {
+			item.disablePending = false
+			item.reconnectPending = false
+			manager.mu.Unlock()
+			operation = func(ctx context.Context, orchestrator *vowifi.Orchestrator) error {
+				_, err := orchestrator.Disable(ctx)
+				return err
+			}
+			continue
+		}
+		if item.reconnectPending {
+			item.reconnectPending = false
+			manager.mu.Unlock()
+
+			// Read the route only when this runs. If the user bound, unbound,
+			// then rebound while busy, this reconnect uses the final persisted
+			// binding instead of replaying stale intermediate routes.
+			operation = func(ctx context.Context, orchestrator *vowifi.Orchestrator) error {
+				_, err := orchestrator.Reconnect(ctx)
+				return err
+			}
+			continue
+		}
+		item.busy = false
+		shouldRetry := item.desiredEnabled && state.Phase == vowifi.PhaseFailed
+		if !shouldRetry && state.Phase != vowifi.PhaseFailed {
+			item.retryFailures = 0
+		}
+		manager.mu.Unlock()
+		if shouldRetry {
+			manager.scheduleAutoRetry(deviceID, item)
+		}
+		return
+	}
+}
+
+func (manager *Manager) scheduleAutoRetry(deviceID string, item *entry) {
+	manager.mu.Lock()
+	if manager.closed || item.busy || item.autoRetryPending || !item.desiredEnabled {
+		manager.mu.Unlock()
+		return
+	}
+	delay := manager.retryInitial
+	for attempt := uint(0); attempt < item.retryFailures && delay < manager.retryMaximum; attempt++ {
+		if delay > manager.retryMaximum/2 {
+			delay = manager.retryMaximum
+			break
+		}
+		delay *= 2
+	}
+	if delay > manager.retryMaximum {
+		delay = manager.retryMaximum
+	}
+	item.retryFailures++
+	item.autoRetryPending = true
+	manager.wg.Add(1)
+	manager.mu.Unlock()
+
+	manager.logger.Info(
+		"VoWiFi automatic retry scheduled",
+		"device_id", deviceID,
+		"retry_in", delay,
+	)
+	go func() {
+		defer manager.wg.Done()
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-manager.ctx.Done():
+			return
+		case <-timer.C:
+		}
+
+		manager.mu.Lock()
+		item.autoRetryPending = false
+		if manager.closed || manager.entries[deviceID] != item || !item.desiredEnabled {
+			manager.mu.Unlock()
+			return
+		}
+		state := item.orchestrator.State()
+		if state.Phase != vowifi.PhaseFailed {
+			if state.Phase != vowifi.PhaseStopping {
+				item.retryFailures = 0
+			}
+			manager.mu.Unlock()
+			return
+		}
+		if item.busy {
+			manager.mu.Unlock()
+			return
+		}
+		item.busy = true
+		manager.wg.Add(1)
 		manager.mu.Unlock()
 
-		// Read the route only when this runs. If the user bound, unbound, then
-		// rebound while busy, the single reconnect uses the final persisted
-		// binding instead of replaying stale intermediate routes.
-		operation = func(ctx context.Context, orchestrator *vowifi.Orchestrator) error {
-			_, err := orchestrator.Reconnect(ctx)
+		go manager.runOperations(deviceID, item, func(ctx context.Context, orchestrator *vowifi.Orchestrator) error {
+			_, err := orchestrator.Retry(ctx)
 			return err
-		}
-	}
+		})
+	}()
 }
 
 func (manager *Manager) watch(deviceID string, states <-chan vowifi.State) {
@@ -309,6 +454,20 @@ func (manager *Manager) watch(deviceID string, states <-chan vowifi.State) {
 		case state, ok := <-states:
 			if !ok {
 				return
+			}
+			if state.Phase == vowifi.PhaseFailed {
+				manager.mu.Lock()
+				item := manager.entries[deviceID]
+				manager.mu.Unlock()
+				if item != nil {
+					manager.scheduleAutoRetry(deviceID, item)
+				}
+			} else if state.Phase == vowifi.PhaseSMSReady || !state.Enabled {
+				manager.mu.Lock()
+				if item := manager.entries[deviceID]; item != nil {
+					item.retryFailures = 0
+				}
+				manager.mu.Unlock()
 			}
 			if manager.onState == nil {
 				continue

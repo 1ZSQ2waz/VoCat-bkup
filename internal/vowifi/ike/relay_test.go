@@ -178,3 +178,39 @@ func TestSessionRelaySendsNATKeepalive(t *testing.T) {
 		t.Fatal("relay did not send a NAT-T keepalive")
 	}
 }
+
+func TestSessionRelayDropsDelayedIKEPacketFromPreviousSA(t *testing.T) {
+	transport := newFakeSessionTransport()
+	spii := [8]byte{1}
+	spir := [8]byte{2}
+	relay := newSessionRelay(
+		transport,
+		legacyTestSuite(),
+		ikeKeys{},
+		spii,
+		spir,
+		true,
+		time.Hour,
+	)
+	defer relay.Close()
+
+	transport.incoming <- fakeSessionPacket{
+		ike: true,
+		data: ikeHeader{
+			InitiatorSPI: [8]byte{9},
+			ResponderSPI: [8]byte{8},
+			Exchange:     exchangeInformational,
+		}.marshal(nil),
+	}
+	wantedESP := []byte{0, 0, 0, 9, 0, 0, 0, 1, 0xaa}
+	transport.incoming <- fakeSessionPacket{data: wantedESP}
+
+	buffer := make([]byte, 64)
+	count, err := relay.ReceiveESP(context.Background(), buffer)
+	if err != nil {
+		t.Fatalf("ReceiveESP() after stale IKE packet = %v", err)
+	}
+	if !bytes.Equal(buffer[:count], wantedESP) {
+		t.Fatalf("ESP after stale IKE packet = %x, want %x", buffer[:count], wantedESP)
+	}
+}
